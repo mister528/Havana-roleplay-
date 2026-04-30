@@ -367,177 +367,33 @@ namespace
                 }
         }
 
-        // BiDi reorder for an LTR-only renderer (ImGui).
+        // [PER USER PREFERENCE] DO NOT reverse the visual order.
         //
-        // The message is treated as an RTL paragraph because we only enter
-        // this function when ContainsArabic() is true. We split the line into
-        // runs of strong direction (RTL Arabic vs. LTR Latin/digit), with
-        // neutrals (spaces, punctuation, brackets) attached to the correct
-        // surrounding strong direction, then:
-        //   * reverse the run ORDER (so the first logical run ends up on the
-        //     right side of the rendered output),
-        //   * reverse the CHARACTERS inside each RTL run (because ImGui will
-        //     paint them left-to-right),
-        //   * keep characters of LTR runs in original order.
+        // The user's chat / dialog community is used to reading Arabic in
+        // logical (typing) order rendered left-to-right with proper letter
+        // joining, NOT in fully BiDi-reordered visual order.  Earlier
+        // versions of this code reversed RTL run order so the line was
+        // properly Unicode-BiDi correct, but that made every Arabic-only
+        // line look "backwards" to them.
         //
-        // Example:
-        //     logical : "هذا الأمر استخدم /menu, إلى تعرف"
-        //     visual  : "فرعت ىلإ ,/menu مدختسا رمألا اذه"
-        // Reading the visual right-to-left yields the original logical
-        // sentence, with the Latin token "/menu," kept LTR in the middle.
-        auto isStrongLtr = [](uint32_t cp) {
-                return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
-                       (cp >= '0' && cp <= '9');
-        };
-        auto isStrongRtl = [](uint32_t cp) {
-                // Arabic, plus shaped presentation forms produced earlier in
-                // this function.
-                return (cp >= 0x0590 && cp <= 0x08FF) ||
-                       (cp >= 0xFB1D && cp <= 0xFDFF) ||
-                       (cp >= 0xFE70 && cp <= 0xFEFF);
-        };
-
-        // Direction tag per codepoint: 'R' = RTL strong, 'L' = LTR strong,
-        // 'N' = neutral (everything else: spaces, punctuation, ZWJ, etc.).
+        // What we do instead:
+        //   * Shape every Arabic letter (initial / medial / final / isolated)
+        //     so words still join nicely.
+        //   * Emit codepoints in their ORIGINAL logical order. ImGui then
+        //     paints them left-to-right and the user reads the chat the
+        //     same way they typed it.
+        //
+        // The bracket-pair direction resolution and the reversed-run logic
+        // are intentionally skipped; we still keep the local helpers around
+        // so future callers can opt in if needed.
+        // Emit codepoints in original logical order (no run reversal).
         const size_t N = ligatured.size();
-        std::vector<char> dir(N, 'N');
-        for (size_t k = 0; k < N; ++k)
-        {
-                if      (isStrongRtl(ligatured[k])) dir[k] = 'R';
-                else if (isStrongLtr(ligatured[k])) dir[k] = 'L';
-        }
-
-        // ---- Unicode BiDi rule N0: paired bracket resolution. ----
-        // Match opening / closing brackets with a stack and assign both
-        // brackets in a pair the direction of the strong characters they
-        // enclose.  This stops a Latin name in parens (e.g. "(ahmadgatga)")
-        // from having one bracket attached to the surrounding Arabic run
-        // and the other to the Latin run, which is what produced the
-        // "]ahmadgatga) [0(" garbage before the fix.
-        auto bracketKind = [](uint32_t cp) -> int {
-                // returns +1 for opener, -1 for closer, 0 otherwise
-                switch (cp) {
-                        case '(': case '[': case '{':
-                        case 0x00AB: case 0x2039:
-                        case 0x2329: case 0x27E8:
-                                return +1;
-                        case ')': case ']': case '}':
-                        case 0x00BB: case 0x203A:
-                        case 0x232A: case 0x27E9:
-                                return -1;
-                }
-                return 0;
-        };
-        auto bracketsMatch = [](uint32_t op, uint32_t cl) {
-                return (op == '('    && cl == ')')    ||
-                       (op == '['    && cl == ']')    ||
-                       (op == '{'    && cl == '}')    ||
-                       (op == 0x00AB && cl == 0x00BB) ||
-                       (op == 0x2039 && cl == 0x203A) ||
-                       (op == 0x2329 && cl == 0x232A) ||
-                       (op == 0x27E8 && cl == 0x27E9);
-        };
-        struct BPair { size_t open_idx, close_idx; };
-        std::vector<BPair> bpairs;
-        {
-                std::vector<size_t> stack;
-                for (size_t i = 0; i < N; ++i)
-                {
-                        int kind = bracketKind(ligatured[i]);
-                        if (kind == +1) {
-                                stack.push_back(i);
-                        } else if (kind == -1) {
-                                // Pop entries from the stack until we find a
-                                // matching opener.  This mirrors the Unicode
-                                // BD16 algorithm closely enough for our use.
-                                for (size_t s = stack.size(); s-- > 0; )
-                                {
-                                        if (bracketsMatch(ligatured[stack[s]],
-                                                          ligatured[i]))
-                                        {
-                                                bpairs.push_back({stack[s], i});
-                                                stack.resize(s);
-                                                break;
-                                        }
-                                }
-                        }
-                }
-        }
-        // For every pair, look at the strong-direction characters between
-        // the brackets and assign both brackets that direction.  An L
-        // wins over R only when the pair contains no R at all (the rule
-        // is biased toward the paragraph direction, which is RTL here).
-        for (size_t p = 0; p < bpairs.size(); ++p)
-        {
-                char hasR = 0, hasL = 0;
-                for (size_t q = bpairs[p].open_idx + 1; q < bpairs[p].close_idx; ++q)
-                {
-                        if (dir[q] == 'R') { hasR = 1; }
-                        if (dir[q] == 'L') { hasL = 1; }
-                }
-                char take = 0;
-                if      (hasR) take = 'R';
-                else if (hasL) take = 'L';
-                if (take)
-                {
-                        dir[bpairs[p].open_idx ] = take;
-                        dir[bpairs[p].close_idx] = take;
-                }
-        }
-
-        // Resolve neutrals: a run of neutrals between two strongs of the same
-        // direction takes that direction; otherwise it takes the paragraph
-        // direction (RTL here).
-        size_t k = 0;
-        while (k < N)
-        {
-                if (dir[k] != 'N') { ++k; continue; }
-                size_t s = k;
-                while (k < N && dir[k] == 'N') ++k;
-                char prev = (s == 0)   ? 'R' : dir[s - 1]; // start of line uses paragraph dir
-                char next = (k == N)   ? 'R' : dir[k];     // end of line uses paragraph dir
-                char take = (prev == next) ? prev : 'R';
-                for (size_t q = s; q < k; ++q) dir[q] = take;
-        }
-
-        // Build runs of contiguous same-direction codepoints.
-        struct Run { size_t lo, hi; char d; }; // [lo, hi)
-        std::vector<Run> runs;
-        for (size_t s = 0; s < N; )
-        {
-                size_t e = s + 1;
-                while (e < N && dir[e] == dir[s]) ++e;
-                runs.push_back({s, e, dir[s]});
-                s = e;
-        }
-
-        // Emit visual buffer: reversed run order; reverse chars of RTL runs;
-        // keep chars of LTR runs as-is. Also propagate the source-codepoint
-        // index for every emitted visual codepoint.
         out_visual.reserve(N);
         out_src.reserve(N);
-        for (size_t r = runs.size(); r-- > 0; )
+        for (size_t q = 0; q < N; ++q)
         {
-                const Run& run = runs[r];
-                if (run.d == 'L')
-                {
-                        for (size_t q = run.lo; q < run.hi; ++q)
-                        {
-                                out_visual.push_back(ligatured[q]);
-                                out_src.push_back(ligatured_src[q]);
-                        }
-                }
-                else
-                {
-                        for (size_t q = run.hi; q-- > run.lo; )
-                        {
-                                // Mirror brackets that ended up in the
-                                // RTL run so they still "open" on the
-                                // correct side when read right-to-left.
-                                out_visual.push_back(MirrorBracket(ligatured[q]));
-                                out_src.push_back(ligatured_src[q]);
-                        }
-                }
+                out_visual.push_back(ligatured[q]);
+                out_src.push_back(ligatured_src[q]);
         }
         }
 
@@ -556,155 +412,16 @@ namespace
         // forms). Used by callers whose renderer cannot draw presentation
         // forms - notably GTA-SA's CFont used by SAMP TextDraws, whose
         // glyph table is keyed by raw UTF-8 byte values, not codepoints.
-        // We still apply bracket pairing + mirroring so brackets resolve
-        // visually correct in RTL paragraphs.
+        // [PER USER PREFERENCE] No-op pass-through: emit codepoints in
+        // logical order. The user prefers seeing Arabic rendered in typing
+        // (logical) order with proper letter joining, NOT fully BiDi-
+        // reordered visual order. The local helpers below are kept dormant
+        // so future callers can re-enable them if needed.
         void BidiReorderCodepointsKeepBase(const std::vector<uint32_t>& cps,
                                            std::vector<uint32_t>& out_visual)
         {
-                out_visual.clear();
-                if (cps.empty()) return;
-
-                const size_t N = cps.size();
-
-                auto isStrongLtr = [](uint32_t cp) {
-                        return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
-                               (cp >= '0' && cp <= '9');
-                };
-                auto isStrongRtl = [](uint32_t cp) {
-                        return (cp >= 0x0590 && cp <= 0x08FF) ||
-                               (cp >= 0xFB1D && cp <= 0xFDFF) ||
-                               (cp >= 0xFE70 && cp <= 0xFEFF);
-                };
-
-                std::vector<char> dir(N, 'N');
-                for (size_t k = 0; k < N; ++k)
-                {
-                        if      (isStrongRtl(cps[k])) dir[k] = 'R';
-                        else if (isStrongLtr(cps[k])) dir[k] = 'L';
-                }
-
-                // Bracket pairing (Unicode N0).
-                auto bracketKind = [](uint32_t cp) -> int {
-                        switch (cp) {
-                                case '(': case '[': case '{':
-                                case 0x00AB: case 0x2039:
-                                case 0x2329: case 0x27E8: return +1;
-                                case ')': case ']': case '}':
-                                case 0x00BB: case 0x203A:
-                                case 0x232A: case 0x27E9: return -1;
-                        }
-                        return 0;
-                };
-                auto bracketsMatch = [](uint32_t op, uint32_t cl) {
-                        return (op == '('    && cl == ')')    ||
-                               (op == '['    && cl == ']')    ||
-                               (op == '{'    && cl == '}')    ||
-                               (op == 0x00AB && cl == 0x00BB) ||
-                               (op == 0x2039 && cl == 0x203A) ||
-                               (op == 0x2329 && cl == 0x232A) ||
-                               (op == 0x27E8 && cl == 0x27E9);
-                };
-                struct BPair { size_t open_idx, close_idx; };
-                std::vector<BPair> bpairs;
-                {
-                        std::vector<size_t> stack;
-                        for (size_t i = 0; i < N; ++i)
-                        {
-                                int kind = bracketKind(cps[i]);
-                                if (kind == +1) stack.push_back(i);
-                                else if (kind == -1)
-                                {
-                                        for (size_t s = stack.size(); s-- > 0; )
-                                        {
-                                                if (bracketsMatch(cps[stack[s]], cps[i]))
-                                                {
-                                                        bpairs.push_back({stack[s], i});
-                                                        stack.resize(s);
-                                                        break;
-                                                }
-                                        }
-                                }
-                        }
-                }
-                for (size_t p = 0; p < bpairs.size(); ++p)
-                {
-                        char hasR = 0, hasL = 0;
-                        for (size_t q = bpairs[p].open_idx + 1; q < bpairs[p].close_idx; ++q)
-                        {
-                                if (dir[q] == 'R') hasR = 1;
-                                if (dir[q] == 'L') hasL = 1;
-                        }
-                        char take = 0;
-                        if      (hasR) take = 'R';
-                        else if (hasL) take = 'L';
-                        if (take)
-                        {
-                                dir[bpairs[p].open_idx ] = take;
-                                dir[bpairs[p].close_idx] = take;
-                        }
-                }
-
-                // Resolve neutrals (paragraph dir = R).
-                size_t k = 0;
-                while (k < N)
-                {
-                        if (dir[k] != 'N') { ++k; continue; }
-                        size_t s = k;
-                        while (k < N && dir[k] == 'N') ++k;
-                        char prev = (s == 0)   ? 'R' : dir[s - 1];
-                        char next = (k == N)   ? 'R' : dir[k];
-                        char take = (prev == next) ? prev : 'R';
-                        for (size_t q = s; q < k; ++q) dir[q] = take;
-                }
-
-                struct Run { size_t lo, hi; char d; };
-                std::vector<Run> runs;
-                for (size_t s = 0; s < N; )
-                {
-                        size_t e = s + 1;
-                        while (e < N && dir[e] == dir[s]) ++e;
-                        runs.push_back({s, e, dir[s]});
-                        s = e;
-                }
-
-                out_visual.reserve(N);
-                for (size_t r = runs.size(); r-- > 0; )
-                {
-                        const Run& run = runs[r];
-                        if (run.d == 'L')
-                        {
-                                for (size_t q = run.lo; q < run.hi; ++q)
-                                        out_visual.push_back(cps[q]);
-                        }
-                        else
-                        {
-                                for (size_t q = run.hi; q-- > run.lo; )
-                                {
-                                        // Mirror brackets resolved as RTL.
-                                        uint32_t cp = cps[q];
-                                        switch (cp) {
-                                                case '(': cp = ')'; break;
-                                                case ')': cp = '('; break;
-                                                case '[': cp = ']'; break;
-                                                case ']': cp = '['; break;
-                                                case '{': cp = '}'; break;
-                                                case '}': cp = '{'; break;
-                                                case '<': cp = '>'; break;
-                                                case '>': cp = '<'; break;
-                                                case 0x00AB: cp = 0x00BB; break;
-                                                case 0x00BB: cp = 0x00AB; break;
-                                                case 0x2039: cp = 0x203A; break;
-                                                case 0x203A: cp = 0x2039; break;
-                                                case 0x2329: cp = 0x232A; break;
-                                                case 0x232A: cp = 0x2329; break;
-                                                case 0x27E8: cp = 0x27E9; break;
-                                                case 0x27E9: cp = 0x27E8; break;
-                                                default: break;
-                                        }
-                                        out_visual.push_back(cp);
-                                }
-                        }
-                }
+                out_visual.assign(cps.begin(), cps.end());
+                return;
         }
 } // anonymous namespace
 
