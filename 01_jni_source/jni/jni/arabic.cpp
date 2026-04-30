@@ -89,49 +89,6 @@ namespace
                        (cp >= 0xFE70 && cp <= 0xFEFF);
         }
 
-        // True only for *unshaped* Arabic in the basic block. We use this
-        // to decide whether a string actually needs the shape + BiDi pass.
-        // Presentation forms (U+FE70..U+FEFF, U+FB50..U+FDFF) have already
-        // been shaped + reordered by an earlier call (or by an upstream
-        // server hack) and re-running the pass on them would reverse the
-        // visual order a second time, producing the garbled output the
-        // user sees on admin notifications etc.
-        bool NeedsBidi(uint32_t cp)
-        {
-                return cp >= 0x0600 && cp <= 0x06FF;
-        }
-
-        // Mirror table for bracket characters that end up resolved as
-        // RTL.  When we paint an RTL run we walk it right-to-left, so an
-        // opening bracket at the logical start of an RTL chunk needs to
-        // be drawn as the corresponding closing bracket so the bracket
-        // pair still "opens" on the correct side when read RTL.  Only
-        // the ASCII bracket pairs are common in chat, but the few BMP
-        // pairs that appear in Arabic content are included for safety.
-        uint32_t MirrorBracket(uint32_t cp)
-        {
-                switch (cp)
-                {
-                        case '(':    return ')';
-                        case ')':    return '(';
-                        case '[':    return ']';
-                        case ']':    return '[';
-                        case '{':    return '}';
-                        case '}':    return '{';
-                        case '<':    return '>';
-                        case '>':    return '<';
-                        case 0x00AB: return 0x00BB; // « »
-                        case 0x00BB: return 0x00AB;
-                        case 0x2039: return 0x203A; // ‹ ›
-                        case 0x203A: return 0x2039;
-                        case 0x2329: return 0x232A;
-                        case 0x232A: return 0x2329;
-                        case 0x27E8: return 0x27E9;
-                        case 0x27E9: return 0x27E8;
-                        default:     return cp;
-                }
-        }
-
         // Mapping of base Arabic letters (U+0621..U+064A and a few extended)
         // to {isolated, final, initial, medial} presentation forms.
         // 0 means "no such form, fall back to isolated".
@@ -367,33 +324,96 @@ namespace
                 }
         }
 
-        // [PER USER PREFERENCE] DO NOT reverse the visual order.
+        // BiDi reorder for an LTR-only renderer (ImGui).
         //
-        // The user's chat / dialog community is used to reading Arabic in
-        // logical (typing) order rendered left-to-right with proper letter
-        // joining, NOT in fully BiDi-reordered visual order.  Earlier
-        // versions of this code reversed RTL run order so the line was
-        // properly Unicode-BiDi correct, but that made every Arabic-only
-        // line look "backwards" to them.
+        // The message is treated as an RTL paragraph because we only enter
+        // this function when ContainsArabic() is true. We split the line into
+        // runs of strong direction (RTL Arabic vs. LTR Latin/digit), with
+        // neutrals (spaces, punctuation, brackets) attached to the correct
+        // surrounding strong direction, then:
+        //   * reverse the run ORDER (so the first logical run ends up on the
+        //     right side of the rendered output),
+        //   * reverse the CHARACTERS inside each RTL run (because ImGui will
+        //     paint them left-to-right),
+        //   * keep characters of LTR runs in original order.
         //
-        // What we do instead:
-        //   * Shape every Arabic letter (initial / medial / final / isolated)
-        //     so words still join nicely.
-        //   * Emit codepoints in their ORIGINAL logical order. ImGui then
-        //     paints them left-to-right and the user reads the chat the
-        //     same way they typed it.
-        //
-        // The bracket-pair direction resolution and the reversed-run logic
-        // are intentionally skipped; we still keep the local helpers around
-        // so future callers can opt in if needed.
-        // Emit codepoints in original logical order (no run reversal).
+        // Example:
+        //     logical : "هذا الأمر استخدم /menu, إلى تعرف"
+        //     visual  : "فرعت ىلإ ,/menu مدختسا رمألا اذه"
+        // Reading the visual right-to-left yields the original logical
+        // sentence, with the Latin token "/menu," kept LTR in the middle.
+        auto isStrongLtr = [](uint32_t cp) {
+                return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+                       (cp >= '0' && cp <= '9');
+        };
+        auto isStrongRtl = [](uint32_t cp) {
+                // Arabic, plus shaped presentation forms produced earlier in
+                // this function.
+                return (cp >= 0x0590 && cp <= 0x08FF) ||
+                       (cp >= 0xFB1D && cp <= 0xFDFF) ||
+                       (cp >= 0xFE70 && cp <= 0xFEFF);
+        };
+
+        // Direction tag per codepoint: 'R' = RTL strong, 'L' = LTR strong,
+        // 'N' = neutral (everything else: spaces, punctuation, ZWJ, etc.).
         const size_t N = ligatured.size();
+        std::vector<char> dir(N, 'N');
+        for (size_t k = 0; k < N; ++k)
+        {
+                if      (isStrongRtl(ligatured[k])) dir[k] = 'R';
+                else if (isStrongLtr(ligatured[k])) dir[k] = 'L';
+        }
+
+        // Resolve neutrals: a run of neutrals between two strongs of the same
+        // direction takes that direction; otherwise it takes the paragraph
+        // direction (RTL here).
+        size_t k = 0;
+        while (k < N)
+        {
+                if (dir[k] != 'N') { ++k; continue; }
+                size_t s = k;
+                while (k < N && dir[k] == 'N') ++k;
+                char prev = (s == 0)   ? 'R' : dir[s - 1]; // start of line uses paragraph dir
+                char next = (k == N)   ? 'R' : dir[k];     // end of line uses paragraph dir
+                char take = (prev == next) ? prev : 'R';
+                for (size_t q = s; q < k; ++q) dir[q] = take;
+        }
+
+        // Build runs of contiguous same-direction codepoints.
+        struct Run { size_t lo, hi; char d; }; // [lo, hi)
+        std::vector<Run> runs;
+        for (size_t s = 0; s < N; )
+        {
+                size_t e = s + 1;
+                while (e < N && dir[e] == dir[s]) ++e;
+                runs.push_back({s, e, dir[s]});
+                s = e;
+        }
+
+        // Emit visual buffer: reversed run order; reverse chars of RTL runs;
+        // keep chars of LTR runs as-is. Also propagate the source-codepoint
+        // index for every emitted visual codepoint.
         out_visual.reserve(N);
         out_src.reserve(N);
-        for (size_t q = 0; q < N; ++q)
+        for (size_t r = runs.size(); r-- > 0; )
         {
-                out_visual.push_back(ligatured[q]);
-                out_src.push_back(ligatured_src[q]);
+                const Run& run = runs[r];
+                if (run.d == 'L')
+                {
+                        for (size_t q = run.lo; q < run.hi; ++q)
+                        {
+                                out_visual.push_back(ligatured[q]);
+                                out_src.push_back(ligatured_src[q]);
+                        }
+                }
+                else
+                {
+                        for (size_t q = run.hi; q-- > run.lo; )
+                        {
+                                out_visual.push_back(ligatured[q]);
+                                out_src.push_back(ligatured_src[q]);
+                        }
+                }
         }
         }
 
@@ -406,22 +426,6 @@ namespace
                 out_visual.assign(cps.begin(), cps.end());
                 out_src.resize(cps.size());
                 for (size_t i = 0; i < cps.size(); ++i) out_src[i] = (int)i;
-        }
-
-        // BiDi reorder ONLY (no shaping to U+FE70..U+FEFF presentation
-        // forms). Used by callers whose renderer cannot draw presentation
-        // forms - notably GTA-SA's CFont used by SAMP TextDraws, whose
-        // glyph table is keyed by raw UTF-8 byte values, not codepoints.
-        // [PER USER PREFERENCE] No-op pass-through: emit codepoints in
-        // logical order. The user prefers seeing Arabic rendered in typing
-        // (logical) order with proper letter joining, NOT fully BiDi-
-        // reordered visual order. The local helpers below are kept dormant
-        // so future callers can re-enable them if needed.
-        void BidiReorderCodepointsKeepBase(const std::vector<uint32_t>& cps,
-                                           std::vector<uint32_t>& out_visual)
-        {
-                out_visual.assign(cps.begin(), cps.end());
-                return;
         }
 } // anonymous namespace
 
@@ -466,11 +470,8 @@ void Arabic::ShapeWithSourceMap(const char* utf8, int len,
         std::vector<uint32_t> visual;
 
         // Only run the BiDi/shape pass when the paragraph actually has
-        // some Arabic in it; otherwise rendering RTL-context rules onto
-        // a pure LTR line would mis-place punctuation. Both unshaped
-        // basic-block Arabic and already-shaped presentation forms are
-        // RTL strong characters that need to be visually reordered, so
-        // we trigger on either.
+        // Arabic; otherwise rendering RTL-context rules onto a pure LTR
+        // line would mis-place punctuation.
         bool hasArabic = false;
         for (size_t i = 0; i < cps.size(); ++i)
                 if (IsArabicCp(cps[i])) { hasArabic = true; break; }
@@ -601,30 +602,4 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
         }
 
         return x_off;
-}
-
-std::string Arabic::BidiReorderKeepBaseForms(const char* utf8, int len)
-{
-        if (!utf8) return std::string();
-        if (len < 0) len = (int)std::strlen(utf8);
-
-        std::vector<uint32_t> cps;
-        DecodeUtf8(utf8, len, cps);
-        if (cps.empty()) return std::string();
-
-        // No Arabic: return input unchanged so callers can use this as a
-        // drop-in replacement at every TextDraw / HUD / dialog string
-        // entry point without paying for an unnecessary reorder pass.
-        bool hasArabic = false;
-        for (size_t i = 0; i < cps.size(); ++i)
-                if (IsArabicCp(cps[i])) { hasArabic = true; break; }
-        if (!hasArabic) return std::string(utf8, utf8 + len);
-
-        std::vector<uint32_t> visual;
-        BidiReorderCodepointsKeepBase(cps, visual);
-
-        std::string out;
-        out.reserve(visual.size() * 2);
-        for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out);
-        return out;
 }

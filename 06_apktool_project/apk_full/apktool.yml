@@ -12,8 +12,8 @@ packageInfo:
   forcedPackageId: 127
   renameManifestPackage: null
 versionInfo:
-  versionCode: 13
-  versionName: luxury-v5-shape-only
+  versionCode: 14
+  versionName: luxury-v1-revert
 resourcesAreCompressed: false
 sharedLibrary: false
 sparseResources: false

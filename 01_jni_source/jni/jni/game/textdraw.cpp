@@ -4,7 +4,6 @@
 #include "RW/RenderWare.h"
 #include "../gui/gui.h"
 #include "../util/util.h"
-#include "../arabic.h"
 
 extern CGUI* pGUI;
 extern CSnapShotHelper* pSnapShotHelper;
@@ -144,16 +143,7 @@ void CTextDraw::DrawDefault()
 
 	float fUseY = iScreenHeight - ((448.0 - m_TextDrawData.fY) * (iScreenHeight * fVertHudScale));
 	float fUseX = iScreenWidth - ((640.0 - m_TextDrawData.fX) * (iScreenWidth * fHorizHudScale));
-
-	// [FIX] TextDraws sent by the server containing Arabic were rendered
-	// LTR by GTA-SA's stock CFont, so an RTL reader saw every Arabic line
-	// "backwards". Reorder the string with BiDi (keeping the basic
-	// 0x0600..0x06FF block so the existing GTA byte->glyph mapping still
-	// works) so RTL runs are emitted right-to-left and any Latin token
-	// embedded in an Arabic sentence stays in logical order.
-	std::string reordered = Arabic::BidiReorderKeepBaseForms(
-	        (const char*)m_szText, (int)strlen((const char*)m_szText));
-	CFont::PrintString(fUseX, fUseY, reordered.c_str());
+	CFont::PrintString(fUseX, fUseY, (const char*)m_szText);
 
 	CFont::SetEdge(0);
 
