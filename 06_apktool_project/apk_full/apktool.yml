@@ -12,8 +12,8 @@ packageInfo:
   forcedPackageId: 127
   renameManifestPackage: null
 versionInfo:
-  versionCode: 14
-  versionName: luxury-v1-revert
+  versionCode: 15
+  versionName: luxury-v6-brackets
 resourcesAreCompressed: false
 sharedLibrary: false
 sparseResources: false

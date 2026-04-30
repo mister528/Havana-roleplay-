@@ -358,24 +358,101 @@ namespace
         // 'N' = neutral (everything else: spaces, punctuation, ZWJ, etc.).
         const size_t N = ligatured.size();
         std::vector<char> dir(N, 'N');
+        size_t countR = 0, countL = 0;
         for (size_t k = 0; k < N; ++k)
         {
-                if      (isStrongRtl(ligatured[k])) dir[k] = 'R';
-                else if (isStrongLtr(ligatured[k])) dir[k] = 'L';
+                if      (isStrongRtl(ligatured[k])) { dir[k] = 'R'; ++countR; }
+                else if (isStrongLtr(ligatured[k])) { dir[k] = 'L'; ++countL; }
+        }
+
+        // Pick paragraph base direction.
+        //
+        // For lines that are mostly Arabic (e.g. system / admin announcements
+        // such as "* إداري ahmadgatga عند تم مسحه chat.") we use RTL base so
+        // the line reads correctly right-to-left.
+        //
+        // For lines that are mostly Latin with an Arabic word embedded
+        // (e.g. player-list rows "- علا (ahmadgatga) [0]") we use LTR base so
+        // the brackets and level fields stay in the same visual position as
+        // the all-Latin rows ("- hi (ahmadgatga) [0]"). Without this the
+        // surrounding LTR runs would get reordered around the embedded
+        // Arabic name and produce "(ahmadgatga) [0] ﻼﻋ -" instead of
+        // "- ﻼﻋ (ahmadgatga) [0]".
+        const char paraDir = (countL > countR) ? 'L' : 'R';
+
+        // ---- Unicode BiDi rule N0: paired bracket resolution. ----
+        // Match opening / closing brackets with a stack and assign both
+        // brackets in a pair the direction of the strong characters they
+        // enclose. This stops a Latin name in parens (e.g. "(ahmadgatga)")
+        // from having one bracket attached to the surrounding Arabic run
+        // and the other to the Latin run, which produced "]ahmadgatga) [0("
+        // garbage when the line starts with an Arabic player name.
+        {
+                auto bracketKind = [](uint32_t cp) -> int {
+                        switch (cp) {
+                                case '(': case '[': case '{': return +1;
+                                case ')': case ']': case '}': return -1;
+                        }
+                        return 0;
+                };
+                auto bracketsMatch = [](uint32_t op, uint32_t cl) {
+                        return (op == '(' && cl == ')') ||
+                               (op == '[' && cl == ']') ||
+                               (op == '{' && cl == '}');
+                };
+                struct BPair { size_t open_idx, close_idx; };
+                std::vector<BPair> bpairs;
+                std::vector<size_t> bstack;
+                for (size_t i = 0; i < N; ++i)
+                {
+                        int kind = bracketKind(ligatured[i]);
+                        if (kind == +1) bstack.push_back(i);
+                        else if (kind == -1)
+                        {
+                                for (size_t s = bstack.size(); s-- > 0; )
+                                {
+                                        if (bracketsMatch(ligatured[bstack[s]],
+                                                          ligatured[i]))
+                                        {
+                                                bpairs.push_back({bstack[s], i});
+                                                bstack.resize(s);
+                                                break;
+                                        }
+                                }
+                        }
+                }
+                for (size_t p = 0; p < bpairs.size(); ++p)
+                {
+                        char hasR = 0, hasL = 0;
+                        for (size_t q = bpairs[p].open_idx + 1;
+                             q < bpairs[p].close_idx; ++q)
+                        {
+                                if (dir[q] == 'R') hasR = 1;
+                                if (dir[q] == 'L') hasL = 1;
+                        }
+                        char take = 0;
+                        if      (hasR) take = 'R';
+                        else if (hasL) take = 'L';
+                        if (take)
+                        {
+                                dir[bpairs[p].open_idx ] = take;
+                                dir[bpairs[p].close_idx] = take;
+                        }
+                }
         }
 
         // Resolve neutrals: a run of neutrals between two strongs of the same
         // direction takes that direction; otherwise it takes the paragraph
-        // direction (RTL here).
+        // base direction.
         size_t k = 0;
         while (k < N)
         {
                 if (dir[k] != 'N') { ++k; continue; }
                 size_t s = k;
                 while (k < N && dir[k] == 'N') ++k;
-                char prev = (s == 0)   ? 'R' : dir[s - 1]; // start of line uses paragraph dir
-                char next = (k == N)   ? 'R' : dir[k];     // end of line uses paragraph dir
-                char take = (prev == next) ? prev : 'R';
+                char prev = (s == 0)   ? paraDir : dir[s - 1];
+                char next = (k == N)   ? paraDir : dir[k];
+                char take = (prev == next) ? prev : paraDir;
                 for (size_t q = s; q < k; ++q) dir[q] = take;
         }
 
@@ -390,14 +467,14 @@ namespace
                 s = e;
         }
 
-        // Emit visual buffer: reversed run order; reverse chars of RTL runs;
-        // keep chars of LTR runs as-is. Also propagate the source-codepoint
-        // index for every emitted visual codepoint.
+        // Emit visual buffer:
+        //   * Run order: reversed for RTL paragraphs, kept logical for LTR.
+        //   * LTR runs: characters in original order.
+        //   * RTL runs: characters reversed because ImGui paints LTR.
         out_visual.reserve(N);
         out_src.reserve(N);
-        for (size_t r = runs.size(); r-- > 0; )
+        auto emitRun = [&](const Run& run)
         {
-                const Run& run = runs[r];
                 if (run.d == 'L')
                 {
                         for (size_t q = run.lo; q < run.hi; ++q)
@@ -410,10 +487,30 @@ namespace
                 {
                         for (size_t q = run.hi; q-- > run.lo; )
                         {
-                                out_visual.push_back(ligatured[q]);
+                                // Mirror brackets that ended up in the RTL
+                                // run so they still "open" on the correct
+                                // side when read right-to-left.
+                                uint32_t cp = ligatured[q];
+                                switch (cp) {
+                                        case '(': cp = ')'; break;
+                                        case ')': cp = '('; break;
+                                        case '[': cp = ']'; break;
+                                        case ']': cp = '['; break;
+                                        case '{': cp = '}'; break;
+                                        case '}': cp = '{'; break;
+                                }
+                                out_visual.push_back(cp);
                                 out_src.push_back(ligatured_src[q]);
                         }
                 }
+        };
+        if (paraDir == 'R')
+        {
+                for (size_t r = runs.size(); r-- > 0; ) emitRun(runs[r]);
+        }
+        else
+        {
+                for (size_t r = 0; r < runs.size(); ++r) emitRun(runs[r]);
         }
         }
 
