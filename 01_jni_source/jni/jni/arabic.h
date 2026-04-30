@@ -75,4 +75,14 @@ namespace Arabic
                                    float x_offset, void* user);
         float RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
                                  DrawRunFn draw_run, void* user);
+
+        // BiDi-only reorder for renderers that DON'T have presentation
+        // forms in their font (e.g. GTA-SA's stock CFont used by SAMP
+        // TextDraws). Decomposes the UTF-8 input to codepoints, runs the
+        // same RTL/LTR resolution + bracket pairing as Shape() does, but
+        // emits the basic-block Arabic codepoints unchanged in visual
+        // order rather than converting them to U+FE70..U+FEFF
+        // presentation forms. Brackets that resolve as RTL are still
+        // mirrored.
+        std::string BidiReorderKeepBaseForms(const char* utf8, int len = -1);
 }

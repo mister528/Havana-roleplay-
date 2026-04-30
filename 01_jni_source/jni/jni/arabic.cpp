@@ -551,6 +551,161 @@ namespace
                 out_src.resize(cps.size());
                 for (size_t i = 0; i < cps.size(); ++i) out_src[i] = (int)i;
         }
+
+        // BiDi reorder ONLY (no shaping to U+FE70..U+FEFF presentation
+        // forms). Used by callers whose renderer cannot draw presentation
+        // forms - notably GTA-SA's CFont used by SAMP TextDraws, whose
+        // glyph table is keyed by raw UTF-8 byte values, not codepoints.
+        // We still apply bracket pairing + mirroring so brackets resolve
+        // visually correct in RTL paragraphs.
+        void BidiReorderCodepointsKeepBase(const std::vector<uint32_t>& cps,
+                                           std::vector<uint32_t>& out_visual)
+        {
+                out_visual.clear();
+                if (cps.empty()) return;
+
+                const size_t N = cps.size();
+
+                auto isStrongLtr = [](uint32_t cp) {
+                        return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+                               (cp >= '0' && cp <= '9');
+                };
+                auto isStrongRtl = [](uint32_t cp) {
+                        return (cp >= 0x0590 && cp <= 0x08FF) ||
+                               (cp >= 0xFB1D && cp <= 0xFDFF) ||
+                               (cp >= 0xFE70 && cp <= 0xFEFF);
+                };
+
+                std::vector<char> dir(N, 'N');
+                for (size_t k = 0; k < N; ++k)
+                {
+                        if      (isStrongRtl(cps[k])) dir[k] = 'R';
+                        else if (isStrongLtr(cps[k])) dir[k] = 'L';
+                }
+
+                // Bracket pairing (Unicode N0).
+                auto bracketKind = [](uint32_t cp) -> int {
+                        switch (cp) {
+                                case '(': case '[': case '{':
+                                case 0x00AB: case 0x2039:
+                                case 0x2329: case 0x27E8: return +1;
+                                case ')': case ']': case '}':
+                                case 0x00BB: case 0x203A:
+                                case 0x232A: case 0x27E9: return -1;
+                        }
+                        return 0;
+                };
+                auto bracketsMatch = [](uint32_t op, uint32_t cl) {
+                        return (op == '('    && cl == ')')    ||
+                               (op == '['    && cl == ']')    ||
+                               (op == '{'    && cl == '}')    ||
+                               (op == 0x00AB && cl == 0x00BB) ||
+                               (op == 0x2039 && cl == 0x203A) ||
+                               (op == 0x2329 && cl == 0x232A) ||
+                               (op == 0x27E8 && cl == 0x27E9);
+                };
+                struct BPair { size_t open_idx, close_idx; };
+                std::vector<BPair> bpairs;
+                {
+                        std::vector<size_t> stack;
+                        for (size_t i = 0; i < N; ++i)
+                        {
+                                int kind = bracketKind(cps[i]);
+                                if (kind == +1) stack.push_back(i);
+                                else if (kind == -1)
+                                {
+                                        for (size_t s = stack.size(); s-- > 0; )
+                                        {
+                                                if (bracketsMatch(cps[stack[s]], cps[i]))
+                                                {
+                                                        bpairs.push_back({stack[s], i});
+                                                        stack.resize(s);
+                                                        break;
+                                                }
+                                        }
+                                }
+                        }
+                }
+                for (size_t p = 0; p < bpairs.size(); ++p)
+                {
+                        char hasR = 0, hasL = 0;
+                        for (size_t q = bpairs[p].open_idx + 1; q < bpairs[p].close_idx; ++q)
+                        {
+                                if (dir[q] == 'R') hasR = 1;
+                                if (dir[q] == 'L') hasL = 1;
+                        }
+                        char take = 0;
+                        if      (hasR) take = 'R';
+                        else if (hasL) take = 'L';
+                        if (take)
+                        {
+                                dir[bpairs[p].open_idx ] = take;
+                                dir[bpairs[p].close_idx] = take;
+                        }
+                }
+
+                // Resolve neutrals (paragraph dir = R).
+                size_t k = 0;
+                while (k < N)
+                {
+                        if (dir[k] != 'N') { ++k; continue; }
+                        size_t s = k;
+                        while (k < N && dir[k] == 'N') ++k;
+                        char prev = (s == 0)   ? 'R' : dir[s - 1];
+                        char next = (k == N)   ? 'R' : dir[k];
+                        char take = (prev == next) ? prev : 'R';
+                        for (size_t q = s; q < k; ++q) dir[q] = take;
+                }
+
+                struct Run { size_t lo, hi; char d; };
+                std::vector<Run> runs;
+                for (size_t s = 0; s < N; )
+                {
+                        size_t e = s + 1;
+                        while (e < N && dir[e] == dir[s]) ++e;
+                        runs.push_back({s, e, dir[s]});
+                        s = e;
+                }
+
+                out_visual.reserve(N);
+                for (size_t r = runs.size(); r-- > 0; )
+                {
+                        const Run& run = runs[r];
+                        if (run.d == 'L')
+                        {
+                                for (size_t q = run.lo; q < run.hi; ++q)
+                                        out_visual.push_back(cps[q]);
+                        }
+                        else
+                        {
+                                for (size_t q = run.hi; q-- > run.lo; )
+                                {
+                                        // Mirror brackets resolved as RTL.
+                                        uint32_t cp = cps[q];
+                                        switch (cp) {
+                                                case '(': cp = ')'; break;
+                                                case ')': cp = '('; break;
+                                                case '[': cp = ']'; break;
+                                                case ']': cp = '['; break;
+                                                case '{': cp = '}'; break;
+                                                case '}': cp = '{'; break;
+                                                case '<': cp = '>'; break;
+                                                case '>': cp = '<'; break;
+                                                case 0x00AB: cp = 0x00BB; break;
+                                                case 0x00BB: cp = 0x00AB; break;
+                                                case 0x2039: cp = 0x203A; break;
+                                                case 0x203A: cp = 0x2039; break;
+                                                case 0x2329: cp = 0x232A; break;
+                                                case 0x232A: cp = 0x2329; break;
+                                                case 0x27E8: cp = 0x27E9; break;
+                                                case 0x27E9: cp = 0x27E8; break;
+                                                default: break;
+                                        }
+                                        out_visual.push_back(cp);
+                                }
+                        }
+                }
+        }
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -565,14 +720,6 @@ std::string Arabic::Shape(const char* utf8, int len)
         std::vector<uint32_t> cps;
         DecodeUtf8(utf8, len, cps);
         if (cps.empty()) return std::string();
-
-        // Mirror the gating logic from ShapeWithSourceMap so callers that
-        // hand us pre-shaped text (presentation forms only) get back the
-        // exact same bytes instead of a re-reversed copy.
-        bool needs_bidi = false;
-        for (size_t i = 0; i < cps.size(); ++i)
-                if (NeedsBidi(cps[i])) { needs_bidi = true; break; }
-        if (!needs_bidi) return std::string(utf8, utf8 + len);
 
         std::vector<uint32_t> visual;
         std::vector<int>      src;
@@ -602,16 +749,17 @@ void Arabic::ShapeWithSourceMap(const char* utf8, int len,
         std::vector<uint32_t> visual;
 
         // Only run the BiDi/shape pass when the paragraph actually has
-        // *unshaped* Arabic; otherwise rendering RTL-context rules onto a
-        // pure LTR line would mis-place punctuation, and re-running the
-        // pass on already-shaped (presentation form) text would reverse
-        // the visual order a second time.
-        bool needs_bidi = false;
+        // some Arabic in it; otherwise rendering RTL-context rules onto
+        // a pure LTR line would mis-place punctuation. Both unshaped
+        // basic-block Arabic and already-shaped presentation forms are
+        // RTL strong characters that need to be visually reordered, so
+        // we trigger on either.
+        bool hasArabic = false;
         for (size_t i = 0; i < cps.size(); ++i)
-                if (NeedsBidi(cps[i])) { needs_bidi = true; break; }
+                if (IsArabicCp(cps[i])) { hasArabic = true; break; }
 
-        if (needs_bidi) ShapeCodepoints(cps, visual, out_src_cp_idx);
-        else            PassThroughCodepoints(cps, visual, out_src_cp_idx);
+        if (hasArabic) ShapeCodepoints(cps, visual, out_src_cp_idx);
+        else           PassThroughCodepoints(cps, visual, out_src_cp_idx);
 
         out_utf8.reserve(visual.size() * 2);
         for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out_utf8);
@@ -635,7 +783,7 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
         //    a per-source-codepoint colour array.
         std::string concat;
         std::vector<uint32_t> cp_color;
-        bool needs_bidi = false;
+        bool hasArabic = false;
 
         for (int i = 0; i < n_chunks; ++i)
         {
@@ -650,19 +798,17 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
                 for (size_t k = 0; k < cps.size(); ++k)
                 {
                         cp_color.push_back(chunks[i].color_id);
-                        if (NeedsBidi(cps[k])) needs_bidi = true;
+                        if (IsArabicCp(cps[k])) hasArabic = true;
                 }
                 concat.append(p, p + L);
         }
 
         if (cp_color.empty()) return 0.0f;
 
-        // 2. If there's no *unshaped* Arabic at all the input is either
-        //    pure LTR or pre-shaped/pre-reordered text; either way the
-        //    chunks are already in visual paint order and we hand them
-        //    to the renderer untouched. (Running the BiDi pass on
-        //    presentation forms would reverse them a second time.)
-        if (!needs_bidi)
+        // 2. If there's no Arabic at all the original logical order is
+        //    correct; emit each chunk as its own visual run to preserve
+        //    fast-path width arithmetic.
+        if (!hasArabic)
         {
                 float x = 0.0f;
                 for (int i = 0; i < n_chunks; ++i)
@@ -738,4 +884,30 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
         }
 
         return x_off;
+}
+
+std::string Arabic::BidiReorderKeepBaseForms(const char* utf8, int len)
+{
+        if (!utf8) return std::string();
+        if (len < 0) len = (int)std::strlen(utf8);
+
+        std::vector<uint32_t> cps;
+        DecodeUtf8(utf8, len, cps);
+        if (cps.empty()) return std::string();
+
+        // No Arabic: return input unchanged so callers can use this as a
+        // drop-in replacement at every TextDraw / HUD / dialog string
+        // entry point without paying for an unnecessary reorder pass.
+        bool hasArabic = false;
+        for (size_t i = 0; i < cps.size(); ++i)
+                if (IsArabicCp(cps[i])) { hasArabic = true; break; }
+        if (!hasArabic) return std::string(utf8, utf8 + len);
+
+        std::vector<uint32_t> visual;
+        BidiReorderCodepointsKeepBase(cps, visual);
+
+        std::string out;
+        out.reserve(visual.size() * 2);
+        for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out);
+        return out;
 }
