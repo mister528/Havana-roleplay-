@@ -1,0 +1,94 @@
+HOW TO REBUILD HavanaRP FROM SOURCE — UPDATED
+=================================================
+
+Prerequisites (Linux/Ubuntu):
+- Android NDK r17c   (https://dl.google.com/android/repository/android-ndk-r17c-linux-x86_64.zip)
+- Java 11+ (apksigner)
+- zipalign (sudo apt install zipalign)
+- apktool (bundled here as 06_apktool_project/apktool_2.10.0.jar)
+- libc6-i386, lib32stdc++6  (sudo apt install libc6-i386 lib32stdc++6) — needed by 32-bit pawncc
+
+Folders:
+  pawncc_3.10.9_for_samp/      ← USE THIS for arabonline.amx (file_version=8, SAMP-compatible)
+  pawncc_built_from_source/    ← Pawn 3.10.10 (don't use with -O2; produces v9 = INCOMPATIBLE)
+  build_all.sh                 ← End-to-end pipeline
+
+
+===== A) Build the launcher (libsamp.so → HavanaRp.apk) =====
+
+  cd 01_jni_source/jni
+  ~/android-ndk-r17c/ndk-build NDK_PROJECT_PATH=. \
+      APP_BUILD_SCRIPT=jni/Android.mk \
+      NDK_APPLICATION_MK=jni/Application.mk -j$(nproc)
+  # output: libs/armeabi-v7a/libsamp.so
+
+  # Place libsamp.so inside the apktool project (renamed to libluxury.so):
+  cp libs/armeabi-v7a/libsamp.so \
+     ../../06_apktool_project/apk_full/lib/armeabi-v7a/libluxury.so
+
+  cd ../..
+  java -jar 06_apktool_project/apktool_2.10.0.jar b 06_apktool_project/apk_full \
+      -o HavanaRp.unsigned.apk
+
+  zipalign -p -f 4 HavanaRp.unsigned.apk HavanaRp.aligned.apk
+  apksigner sign \
+      --ks            02_signing/havana.keystore \
+      --ks-key-alias  havana \
+      --ks-pass       pass:havana123 \
+      --key-pass      pass:havana123 \
+      --v1-signing-enabled true \
+      --v2-signing-enabled true \
+      --v3-signing-enabled true \
+      --out           04_final_apk/HavanaRp.apk \
+      HavanaRp.aligned.apk
+
+  # Verify (SHA-256 must equal 59630a1584bfa99f8af37572a474a187233a1e9f5d71167c796d8f786060eb4f):
+  apksigner verify --print-certs 04_final_apk/HavanaRp.apk
+
+
+===== B) Build the gamemode (arabonline.amx) =====
+
+  *** USE PAWN 3.10.9 (pawncc_3.10.9_for_samp), NOT 3.10.10 ***
+  *** DO NOT pass -O2 — produces overlay tables that bump file_version to 9
+      and SAMP 0.3.7 server rejects them with "Run time error 18" ***
+
+  cd 05_gamemode
+  LD_LIBRARY_PATH=../03_build_tools/pawncc_3.10.9_for_samp/lib \
+      ../03_build_tools/pawncc_3.10.9_for_samp/bin/pawncc \
+      -i./include arabonline.pwn -d0 -o./arabonline.amx
+
+  # Verify file_version is 8 (header bytes 6-7 should both be 08):
+  xxd -l 8 arabonline.amx
+  #  → ?? ?? ?? ?? e0 f1 08 08    ← good (size, magic=0xF1E0, file_ver=8, amx_ver=8)
+  #  → ?? ?? ?? ?? e0 f1 09 09    ← BAD; SAMP will reject
+
+
+===== C) Upload =====
+
+  - APK: send 04_final_apk/HavanaRp.apk to your players (install over existing).
+  - amx: upload 05_gamemode/arabonline.amx to FTP /gamemodes/, then:
+         rcon login <password>
+         rcon gmx
+
+
+===== D) Update the YouTube/Music proxy (Fly.io) =====
+
+  cd 07_yt_proxy
+  flyctl deploy --app yt-proxy-jsqytjvy
+  # endpoint: https://yt-proxy-jsqytjvy.fly.dev
+
+
+===== Common gotchas =====
+
+1) SHA-256 fingerprint mismatch → users cannot install update over existing
+   Solution: always sign with the same 02_signing/havana.keystore.
+
+2) "Run time error 18: File is for a newer version of the AMX"
+   → You used pawncc 3.10.10 with -O2 (or 3.11+). Use 3.10.9 without -O2.
+
+3) "BASS create 41" on Top 10 tracks
+   → libbass.so build doesn't support BUFFERPUSH; we use StreamCreateFile(mem=TRUE).
+     Make sure the JNI HTTPS bridge downloads the full file before creating the stream.
+
+4) ".incbin: file not found" for arabic_font_blob.cpp / skintex.cpp
+   → cwd matters; either run ndk-build from 01_jni_source/jni or adjust the .incbin paths.
