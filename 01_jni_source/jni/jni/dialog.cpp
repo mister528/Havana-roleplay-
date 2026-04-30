@@ -6,10 +6,12 @@
 #include "scoreboard.h"
 #include "vendor/imgui/imgui_internal.h"
 #include "keyboard.h"
+#include "arabic.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sstream>
 #include <iostream>
+#include <vector>
 
 extern CGUI* pGUI;
 extern CGame* pGame;
@@ -158,6 +160,85 @@ void CDialogWindow::SetInfo(char* szInfo, int length)
 
 bool ProcessInlineHexColor(const char* start, const char* end, ImVec4& color);
 
+namespace
+{
+	// One logical-order coloured piece of a dialog line. We collect
+	// these per source line and then hand them to
+	// Arabic::RenderColouredLine so a single BiDi pass orders them
+	// across the whole paragraph (instead of each ImGui::TextUnformatted
+	// call shaping its segment in isolation).
+	struct DlgChunk
+	{
+		std::string text;
+		ImVec4      color;
+		bool        hasColor;
+	};
+
+	uint32_t PackImVec4(const ImVec4& c)
+	{
+		auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+		uint8_t r = (uint8_t)(clamp01(c.x) * 255.0f + 0.5f);
+		uint8_t g = (uint8_t)(clamp01(c.y) * 255.0f + 0.5f);
+		uint8_t b = (uint8_t)(clamp01(c.z) * 255.0f + 0.5f);
+		uint8_t a = (uint8_t)(clamp01(c.w) * 255.0f + 0.5f);
+		return (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+	}
+
+	ImVec4 UnpackImVec4(uint32_t v)
+	{
+		float r = ((v >> 16) & 0xFF) / 255.0f;
+		float g = ((v >>  8) & 0xFF) / 255.0f;
+		float b = ((v      ) & 0xFF) / 255.0f;
+		float a = ((v >> 24) & 0xFF) / 255.0f;
+		return ImVec4(r, g, b, a);
+	}
+
+	// Sentinel meaning "use the default ImGui text colour" in the colour
+	// channel passed to Arabic::RenderColouredLine. We pick an ARGB value
+	// that is impossible to produce from a {HEX} tag (alpha = 0).
+	const uint32_t kDlgDefaultColor = 0x00000000u;
+
+	float DlgDrawRunCb(const char* utf8, int len, uint32_t color_id,
+	                   float /*x_off*/, void* /*user*/)
+	{
+		bool pushed = false;
+		if (color_id != kDlgDefaultColor)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, UnpackImVec4(color_id));
+			pushed = true;
+		}
+		ImGui::TextUnformatted(utf8, utf8 + len);
+		if (pushed) ImGui::PopStyleColor();
+		// Keep all visual runs of this line on the same row.
+		ImGui::SameLine(0.0f, 0.0f);
+		// We don't need to track an x offset ourselves - ImGui::SameLine
+		// does it. Returning 0 keeps Arabic::RenderColouredLine happy.
+		return 0.0f;
+	}
+
+	// Render one logical line (already split off at '\n') by passing all
+	// of its coloured chunks through Arabic::RenderColouredLine.
+	void EmitColouredLine(const std::vector<DlgChunk>& line)
+	{
+		if (line.empty()) { ImGui::NewLine(); return; }
+
+		std::vector<Arabic::ColouredChunk> chunks;
+		chunks.reserve(line.size());
+		for (const auto& c : line)
+		{
+			Arabic::ColouredChunk ac;
+			ac.utf8     = c.text.c_str();
+			ac.len      = (int)c.text.size();
+			ac.color_id = c.hasColor ? PackImVec4(c.color) : kDlgDefaultColor;
+			chunks.push_back(ac);
+		}
+		Arabic::RenderColouredLine(chunks.data(), (int)chunks.size(),
+		                           DlgDrawRunCb, nullptr);
+		// RenderColouredLine left us mid-line via SameLine(); flush the row.
+		ImGui::NewLine();
+	}
+}
+
 void TextWithColors(const char* fmt, ...)
 {
 	char tempStr[4096];
@@ -168,47 +249,48 @@ void TextWithColors(const char* fmt, ...)
 	va_end(argPtr);
 	tempStr[sizeof(tempStr) - 1] = '\0';
 
-	bool pushedColorStyle = false;
+	// Walk the format string, building per-line coloured chunk lists.
+	// Newlines flush the current line (so paragraphs render one
+	// BiDi-reordered row at a time), and {HEX} tags switch the active
+	// colour for subsequent text.
+	std::vector<DlgChunk> line;
+	ImVec4 curColor(0, 0, 0, 0);
+	bool   curHasColor = false;
+
+	auto pushText = [&](const char* a, const char* b) {
+		if (a == b) return;
+		DlgChunk c;
+		c.text.assign(a, b);
+		c.color    = curColor;
+		c.hasColor = curHasColor;
+		line.push_back(std::move(c));
+	};
+
 	const char* textStart = tempStr;
-	const char* textCur = tempStr;
+	const char* textCur   = tempStr;
 	while (textCur < (tempStr + sizeof(tempStr)) && *textCur != '\0')
 	{
 		if (*textCur == '{')
 		{
-			// Print accumulated text
-			if (textCur != textStart)
-			{
-				ImGui::TextUnformatted(textStart, textCur);
-				ImGui::SameLine(0.0f, 0.0f);
-			}
+			pushText(textStart, textCur);
 
-			// Process color code
 			const char* colorStart = textCur + 1;
-			do
-			{
-				++textCur;
-			} while (*textCur != '\0' && *textCur != '}');
-
-			// Change color
-			if (pushedColorStyle)
-			{
-				ImGui::PopStyleColor();
-				pushedColorStyle = false;
-			}
+			do { ++textCur; } while (*textCur != '\0' && *textCur != '}');
 
 			ImVec4 textColor;
 			if (ProcessInlineHexColor(colorStart, textCur, textColor))
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, textColor);
-				pushedColorStyle = true;
+				curColor    = textColor;
+				curHasColor = true;
 			}
 
 			textStart = textCur + 1;
 		}
 		else if (*textCur == '\n')
 		{
-			// Print accumulated text an go to next line
-			ImGui::TextUnformatted(textStart, textCur);
+			pushText(textStart, textCur);
+			EmitColouredLine(line);
+			line.clear();
 			textStart = textCur + 1;
 		}
 
@@ -216,12 +298,18 @@ void TextWithColors(const char* fmt, ...)
 	}
 
 	if (textCur != textStart)
-		ImGui::TextUnformatted(textStart, textCur);
-	else
+	{
+		pushText(textStart, textCur);
+		EmitColouredLine(line);
+	}
+	else if (line.empty())
+	{
 		ImGui::NewLine();
-
-	if (pushedColorStyle)
-		ImGui::PopStyleColor();
+	}
+	else
+	{
+		EmitColouredLine(line);
+	}
 }
 
 void DialogWindowInputHandler(const char* str)

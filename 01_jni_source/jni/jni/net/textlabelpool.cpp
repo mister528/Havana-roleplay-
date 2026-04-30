@@ -2,7 +2,10 @@
 #include "../gui/gui.h"
 #include "../game/game.h"
 #include "../chatwindow.h"
+#include "../arabic.h"
 #include "netgame.h"
+#include <vector>
+#include <string>
 
 extern CNetGame *pNetGame;
 extern CChatWindow *pChatWindow;
@@ -368,6 +371,43 @@ void CText3DLabelsPool::Update3DLabel(int labelID, uint32_t color, char* text)
 
 bool ProcessInlineHexColor(const char* start, const char* end, ImVec4& color);
 
+namespace
+{
+	uint32_t PackColorTL(const ImColor& c)
+	{
+		auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+		uint8_t r = (uint8_t)(clamp01(c.Value.x) * 255.0f + 0.5f);
+		uint8_t g = (uint8_t)(clamp01(c.Value.y) * 255.0f + 0.5f);
+		uint8_t b = (uint8_t)(clamp01(c.Value.z) * 255.0f + 0.5f);
+		uint8_t a = (uint8_t)(clamp01(c.Value.w) * 255.0f + 0.5f);
+		return (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+	}
+
+	ImColor UnpackColorTL(uint32_t v)
+	{
+		float r = ((v >> 16) & 0xFF) / 255.0f;
+		float g = ((v >>  8) & 0xFF) / 255.0f;
+		float b = ((v      ) & 0xFF) / 255.0f;
+		float a = ((v >> 24) & 0xFF) / 255.0f;
+		return ImColor(r, g, b, a);
+	}
+
+	struct TLRenderCtx
+	{
+		ImVec2 origin; // top-left of this line
+	};
+
+	float TLDrawRunCb(const char* utf8, int len, uint32_t color_id,
+	                  float x_off, void* user)
+	{
+		auto* ctx = static_cast<TLRenderCtx*>(user);
+		ImVec2 drawPos(ctx->origin.x + x_off, ctx->origin.y);
+		pGUI->RenderText(drawPos, UnpackColorTL(color_id), true,
+		                 utf8, utf8 + len);
+		return ImGui::CalcTextSize(utf8, utf8 + len).x;
+	}
+}
+
 void TextWithColors(ImVec2 pos, ImColor col, const char* szStr, const char* szStrWithoutColors = nullptr)
 {
 	if (pNetGame)
@@ -423,17 +463,11 @@ void TextWithColors(ImVec2 pos, ImColor col, const char* szStr, const char* szSt
 	iCounter = 0;
 	char tempStr[4096];
 
-	//va_list argPtr;
-	//va_start(argPtr, fmt);
-	//vsnprintf(tempStr, sizeof(tempStr), fmt, argPtr);
-	//va_end(argPtr);
-
 	ImVec2 vecPos = pos;
 
 	strcpy(tempStr, szStr);
 	tempStr[sizeof(tempStr) - 1] = '\0';
 
-	bool pushedColorStyle = false;
 	const char* textStart = tempStr;
 	const char* textCur = tempStr;
 
@@ -442,58 +476,72 @@ void TextWithColors(ImVec2 pos, ImColor col, const char* szStr, const char* szSt
 		vecPos.x -= fLineOffsets[0];
 	}
 
-	//vecPos.x -= fLineOffsets[0];
+	// Collect logical-order coloured chunks for the current line and
+	// flush them through Arabic::RenderColouredLine on '\n' / end of
+	// string. This makes BiDi work across the whole label paragraph
+	// instead of each colour segment being shaped independently
+	// (which placed Latin tokens in the wrong visual position when
+	// the surrounding text was Arabic).
+	std::vector<Arabic::ColouredChunk> chunks;
+	std::vector<std::string>           chunk_storage; // owns chunk text
+
+	auto flushLine = [&]()
+	{
+		if (chunks.empty())
+		{
+			vecPos.y += pGUI->GetFontSize();
+			return;
+		}
+		// chunk.utf8 pointers come from chunk_storage[i].c_str().
+		// Re-link in case any storage entries grew their backing buffer.
+		for (size_t i = 0; i < chunks.size(); ++i)
+			chunks[i].utf8 = chunk_storage[i].c_str();
+
+		TLRenderCtx ctx;
+		ctx.origin = vecPos;
+		Arabic::RenderColouredLine(chunks.data(), (int)chunks.size(),
+		                           TLDrawRunCb, &ctx);
+		chunks.clear();
+		chunk_storage.clear();
+		vecPos.y += pGUI->GetFontSize();
+	};
+
+	auto pushChunk = [&](const char* a, const char* b)
+	{
+		if (a == b) return;
+		chunk_storage.emplace_back(a, b);
+		Arabic::ColouredChunk c;
+		c.utf8     = chunk_storage.back().c_str();
+		c.len      = (int)chunk_storage.back().size();
+		c.color_id = PackColorTL(col);
+		chunks.push_back(c);
+	};
+
 	while(textCur < (tempStr + sizeof(tempStr)) && *textCur != '\0')
 	{
 		if (*textCur == '{')
 		{
-			// Print accumulated text
-			if (textCur != textStart)
-			{
-				//ImGui::TextUnformatted(textStart, textCur);
-				pGUI->RenderText(vecPos, col, true, textStart, textCur);
-				//ImGui::SameLine(0.0f, 0.0f);
-				vecPos.x += ImGui::CalcTextSize(textStart, textCur).x;
-			}
+			pushChunk(textStart, textCur);
 
-			// Process color code
 			const char* colorStart = textCur + 1;
-			do
-			{
-				++textCur;
-			} while (*textCur != '\0' && *textCur != '}');
-
-			// Change color
-			if (pushedColorStyle)
-			{
-				//ImGui::PopStyleColor();
-				pushedColorStyle = false;
-			}
+			do { ++textCur; } while (*textCur != '\0' && *textCur != '}');
 
 			ImVec4 textColor;
 			if (ProcessInlineHexColor(colorStart, textCur, textColor))
-			{
-				//ImGui::PushStyleColor(ImGuiCol_Text, textColor);
 				col = textColor;
-				pushedColorStyle = true;
-			}
 
 			textStart = textCur + 1;
 		}
 		else if (*textCur == '\n')
 		{
-			// Print accumulated text an go to next line
-			//ImGui::TextUnformatted(textStart, textCur);
-			pGUI->RenderText(vecPos, col, true, textStart, textCur);
+			pushChunk(textStart, textCur);
+			flushLine();
 			iCounter++;
 
-			vecPos.x = pos.x;//+= ImGui::CalcTextSize(textStart, textCur).x;
+			vecPos.x = pos.x;
 			if (szStrWithoutColors)
-			{
 				vecPos.x -= fLineOffsets[iCounter];
-			}
 
-			vecPos.y += pGUI->GetFontSize();
 			textStart = textCur + 1;
 		}
 
@@ -501,17 +549,11 @@ void TextWithColors(ImVec2 pos, ImColor col, const char* szStr, const char* szSt
 	}
 
 	if (textCur != textStart)
-		//ImGui::TextUnformatted(textStart, textCur);
-	{
-		pGUI->RenderText(vecPos, col, true, textStart, textCur);
-		vecPos.x += ImGui::CalcTextSize(textStart, textCur).x;
-	}
+		pushChunk(textStart, textCur);
+	if (!chunks.empty())
+		flushLine();
 	else
-		//ImGui::NewLine();
 		vecPos.y += pGUI->GetFontSize();
-
-	//if(pushedColorStyle)
-	//	ImGui::PopStyleColor();
 }
 
 #include "..//game/game.h"

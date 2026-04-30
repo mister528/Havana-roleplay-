@@ -604,6 +604,45 @@ void CChatWindow::ReInit()
 	m_fOffsetBefore = 0.0f;
 }
 
+// Pack an ImColor into a uint32_t for use as the opaque colour id passed
+// through Arabic::RenderColouredLine. We pack the float colour back into
+// 0xAARRGGBB so we can reconstruct the ImColor on the draw side without
+// extra storage.
+static uint32_t PackImColor(const ImColor& c)
+{
+	auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+	uint8_t r = (uint8_t)(clamp01(c.Value.x) * 255.0f + 0.5f);
+	uint8_t g = (uint8_t)(clamp01(c.Value.y) * 255.0f + 0.5f);
+	uint8_t b = (uint8_t)(clamp01(c.Value.z) * 255.0f + 0.5f);
+	uint8_t a = (uint8_t)(clamp01(c.Value.w) * 255.0f + 0.5f);
+	return (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+}
+
+static ImColor UnpackImColor(uint32_t v)
+{
+	float r = ((v >> 16) & 0xFF) / 255.0f;
+	float g = ((v >>  8) & 0xFF) / 255.0f;
+	float b = ((v      ) & 0xFF) / 255.0f;
+	float a = ((v >> 24) & 0xFF) / 255.0f;
+	return ImColor(r, g, b, a);
+}
+
+struct ChatRenderCtx
+{
+	ImVec2 pos;     // current caret position; .x is updated by the draw callback
+	float  posY;    // line baseline Y
+};
+
+static float ChatDrawRunCb(const char* utf8, int len, uint32_t color_id,
+                           float x_off, void* user)
+{
+	auto* ctx = static_cast<ChatRenderCtx*>(user);
+	ImVec2 drawPos(ctx->pos.x + x_off, ctx->posY);
+	pGUI->RenderTextForChatWindow(drawPos, UnpackImColor(color_id), true,
+	                              utf8, utf8 + len);
+	return ImGui::CalcTextSize(utf8, utf8 + len).x;
+}
+
 void CChatWindow::RenderText(const char* u8Str, float posX, float posY, uint32_t dwColor, float alphaNewMessage)
 {
 	const char* textStart = u8Str;
@@ -612,35 +651,44 @@ void CChatWindow::RenderText(const char* u8Str, float posX, float posY, uint32_t
 
 	uint8_t bAlpha = GetAlphaFromLastTimePushedMessage();
 
-	ImVec2 posCur = ImVec2(posX, posY);
 	ImColor colorCur = ImColor(dwColor);
 	if (bAlpha != 255)
 	{
 		colorCur.Value.w = (float)bAlpha / 255.0f;
 	}
-	ImVec4 col;
-
 	if (alphaNewMessage != 1.0f)
 	{
 		colorCur.Value.w = alphaNewMessage;
 	}
+	ImVec4 col;
+
+	// Walk the message and split it into colour-tagged chunks. Each chunk
+	// is logically-ordered text plus the colour to draw it in. We then
+	// hand the full list to Arabic::RenderColouredLine which performs a
+	// SINGLE BiDi pass across the whole paragraph and emits visual runs
+	// in left-to-right paint order with their colours preserved at the
+	// correct visual position.
+	//
+	// This fixes the pre-existing bug where a logical line such as
+	//     "{FFFFFF}مرحبا {00FF00}GPS{FFFFFF} توجه هناك"
+	// was rendered by shaping each colour segment independently and
+	// laying them out left-to-right, which placed the English token in
+	// the wrong visual slot for Arabic readers.
+	std::vector<Arabic::ColouredChunk> chunks;
 
 	while (*textCur)
 	{
-		// {BBCCDD}
-		// '{' e '}' niioaaonoao?o ASCII eiae?iaea
 		if (textCur[0] == '{' && ((&textCur[7] < textEnd) && textCur[7] == '}'))
 		{
-			// Auaiaei oaeno ai oeao?iie neiaee
 			if (textCur != textStart)
 			{
-				// ImDrawList::AddText already shapes Arabic; pass raw bytes.
-				pGUI->RenderTextForChatWindow(posCur, colorCur, true, textStart, textCur);
-
-				posCur.x += ImGui::CalcTextSize(textStart, textCur).x;
+				Arabic::ColouredChunk c;
+				c.utf8     = textStart;
+				c.len      = (int)(textCur - textStart);
+				c.color_id = PackImColor(colorCur);
+				chunks.push_back(c);
 			}
 
-			// Iieo?aai oaao
 			if (ProcessInlineHexColor(textCur + 1, textCur + 7, col))
 			{
 				colorCur = col;
@@ -654,7 +702,6 @@ void CChatWindow::RenderText(const char* u8Str, float posX, float posY, uint32_t
 				}
 			}
 
-			// Aaeaaai niauaiea
 			textCur += 7;
 			textStart = textCur + 1;
 		}
@@ -664,11 +711,20 @@ void CChatWindow::RenderText(const char* u8Str, float posX, float posY, uint32_t
 
 	if (textCur != textStart)
 	{
-		// ImDrawList::AddText already shapes Arabic; pass raw bytes.
-		pGUI->RenderTextForChatWindow(posCur, colorCur, true, textStart, textCur);
+		Arabic::ColouredChunk c;
+		c.utf8     = textStart;
+		c.len      = (int)(textCur - textStart);
+		c.color_id = PackImColor(colorCur);
+		chunks.push_back(c);
 	}
 
-	return;
+	if (chunks.empty()) return;
+
+	ChatRenderCtx ctx;
+	ctx.pos  = ImVec2(posX, posY);
+	ctx.posY = posY;
+	Arabic::RenderColouredLine(chunks.data(), (int)chunks.size(),
+	                           ChatDrawRunCb, &ctx);
 }
 
 void CChatWindow::SetChatDissappearTimeout(uint32_t uiTimeoutStart, uint32_t uiTimeoutEnd)

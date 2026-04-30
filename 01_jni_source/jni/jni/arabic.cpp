@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <string>
 
 // ============================================================================
 //   Arabic shaping + minimal BiDi for ImGui-style font rendering.
@@ -191,23 +192,45 @@ namespace
 
 bool Arabic::ContainsArabic(const char* utf8, int len)
 {
+        // We only return true when the input contains *unshaped* Arabic
+        // (basic block U+0600..U+06FF). Strings made up exclusively of
+        // Arabic Presentation Forms (U+FE70..U+FEFF and U+FB50..U+FDFF)
+        // have already been shaped + bidi-reordered by an earlier call
+        // to Shape(); re-running Shape() on them would reverse the BiDi
+        // ordering a second time. Guarding here keeps re-entry safe so
+        // callers like CChatWindow::RenderText can pre-shape a whole
+        // colour-tagged paragraph and then hand individual visual runs
+        // off to ImDrawList::AddText without it shaping each run again.
         if (!utf8) return false;
         if (len < 0) len = (int)std::strlen(utf8);
         std::vector<uint32_t> cps;
         DecodeUtf8(utf8, len, cps);
         for (size_t i = 0; i < cps.size(); ++i)
-                if (IsArabicCp(cps[i])) return true;
+                if (cps[i] >= 0x0600 && cps[i] <= 0x06FF) return true;
         return false;
 }
 
-std::string Arabic::Shape(const char* utf8, int len)
+// ---------------------------------------------------------------------------
+// Internal shaping core
+// ---------------------------------------------------------------------------
+//
+// Operates entirely on codepoint arrays. Produces:
+//   * `out_visual` - codepoints in visual (left-to-right paint) order.
+//   * `out_src`    - parallel array; out_src[k] is the index of the source
+//                    codepoint (0..cps.size()-1) that out_visual[k] came
+//                    from. For LAM+ALEF ligatures we record the index of
+//                    the LAM (first of the two source codepoints).
+//
+// `Arabic::Shape` is now a thin UTF-8 wrapper around this helper.
+namespace
 {
-        if (!utf8) return std::string();
-        if (len < 0) len = (int)std::strlen(utf8);
-
-        std::vector<uint32_t> cps;
-        DecodeUtf8(utf8, len, cps);
-        if (cps.empty()) return std::string();
+        void ShapeCodepoints(const std::vector<uint32_t>& cps,
+                             std::vector<uint32_t>& out_visual,
+                             std::vector<int>&      out_src)
+        {
+                out_visual.clear();
+                out_src.clear();
+                if (cps.empty()) return;
 
         // Pre-compute join types and shaped variants per glyph.
         struct G { uint32_t cp; JoinType jt; bool isArabic; };
@@ -266,8 +289,12 @@ std::string Arabic::Shape(const char* utf8, int len)
         }
 
         // LAM + ALEF ligatures: walk the shaped string and merge.
+        // Track the original source-codepoint index of each ligatured glyph
+        // so callers can map output codepoints back to colour tags etc.
         std::vector<uint32_t> ligatured;
+        std::vector<int>      ligatured_src;
         ligatured.reserve(shaped.size());
+        ligatured_src.reserve(shaped.size());
         for (size_t i = 0; i < shaped.size(); ++i)
         {
                 bool merged = false;
@@ -283,13 +310,18 @@ std::string Arabic::Shape(const char* utf8, int len)
                                         // else "iso".
                                         bool lamLinked = (shaped[i] == GetForms(0x0644)->med || shaped[i] == GetForms(0x0644)->fin);
                                         ligatured.push_back(lamLinked ? kLamAlef[k].fin : kLamAlef[k].iso);
+                                        ligatured_src.push_back((int)i); // attribute ligature to the LAM
                                         ++i; // skip the alef
                                         merged = true;
                                         break;
                                 }
                         }
                 }
-                if (!merged) ligatured.push_back(shaped[i]);
+                if (!merged)
+                {
+                        ligatured.push_back(shaped[i]);
+                        ligatured_src.push_back((int)i);
+                }
         }
 
         // BiDi reorder for an LTR-only renderer (ImGui).
@@ -359,27 +391,215 @@ std::string Arabic::Shape(const char* utf8, int len)
         }
 
         // Emit visual buffer: reversed run order; reverse chars of RTL runs;
-        // keep chars of LTR runs as-is.
-        std::vector<uint32_t> visual;
-        visual.reserve(N);
+        // keep chars of LTR runs as-is. Also propagate the source-codepoint
+        // index for every emitted visual codepoint.
+        out_visual.reserve(N);
+        out_src.reserve(N);
         for (size_t r = runs.size(); r-- > 0; )
         {
                 const Run& run = runs[r];
                 if (run.d == 'L')
                 {
                         for (size_t q = run.lo; q < run.hi; ++q)
-                                visual.push_back(ligatured[q]);
+                        {
+                                out_visual.push_back(ligatured[q]);
+                                out_src.push_back(ligatured_src[q]);
+                        }
                 }
                 else
                 {
                         for (size_t q = run.hi; q-- > run.lo; )
-                                visual.push_back(ligatured[q]);
+                        {
+                                out_visual.push_back(ligatured[q]);
+                                out_src.push_back(ligatured_src[q]);
+                        }
                 }
         }
+        }
 
-        // Encode back to UTF-8.
+        // ----- LTR-only fallback used when the input has no Arabic -----
+        // Keeps the codepoint order; produces an identity src map.
+        void PassThroughCodepoints(const std::vector<uint32_t>& cps,
+                                   std::vector<uint32_t>& out_visual,
+                                   std::vector<int>&      out_src)
+        {
+                out_visual.assign(cps.begin(), cps.end());
+                out_src.resize(cps.size());
+                for (size_t i = 0; i < cps.size(); ++i) out_src[i] = (int)i;
+        }
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+std::string Arabic::Shape(const char* utf8, int len)
+{
+        if (!utf8) return std::string();
+        if (len < 0) len = (int)std::strlen(utf8);
+
+        std::vector<uint32_t> cps;
+        DecodeUtf8(utf8, len, cps);
+        if (cps.empty()) return std::string();
+
+        std::vector<uint32_t> visual;
+        std::vector<int>      src;
+        ShapeCodepoints(cps, visual, src);
+
         std::string out;
         out.reserve(visual.size() * 2);
         for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out);
         return out;
+}
+
+void Arabic::ShapeWithSourceMap(const char* utf8, int len,
+                                std::string& out_utf8,
+                                std::vector<int>& out_src_cp_idx,
+                                int* out_src_cp_count)
+{
+        out_utf8.clear();
+        out_src_cp_idx.clear();
+        if (!utf8) { if (out_src_cp_count) *out_src_cp_count = 0; return; }
+        if (len < 0) len = (int)std::strlen(utf8);
+
+        std::vector<uint32_t> cps;
+        DecodeUtf8(utf8, len, cps);
+        if (out_src_cp_count) *out_src_cp_count = (int)cps.size();
+        if (cps.empty()) return;
+
+        std::vector<uint32_t> visual;
+
+        // Only run the BiDi/shape pass when the paragraph actually has
+        // Arabic; otherwise rendering RTL-context rules onto a pure LTR
+        // line would mis-place punctuation.
+        bool hasArabic = false;
+        for (size_t i = 0; i < cps.size(); ++i)
+                if (IsArabicCp(cps[i])) { hasArabic = true; break; }
+
+        if (hasArabic) ShapeCodepoints(cps, visual, out_src_cp_idx);
+        else           PassThroughCodepoints(cps, visual, out_src_cp_idx);
+
+        out_utf8.reserve(visual.size() * 2);
+        for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out_utf8);
+}
+
+int Arabic::CountCodepoints(const char* utf8, int len)
+{
+        if (!utf8) return 0;
+        if (len < 0) len = (int)std::strlen(utf8);
+        std::vector<uint32_t> cps;
+        DecodeUtf8(utf8, len, cps);
+        return (int)cps.size();
+}
+
+float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
+                                 DrawRunFn draw_run, void* user)
+{
+        if (!chunks || n_chunks <= 0 || !draw_run) return 0.0f;
+
+        // 1. Concatenate every chunk into a single UTF-8 buffer and build
+        //    a per-source-codepoint colour array.
+        std::string concat;
+        std::vector<uint32_t> cp_color;
+        bool hasArabic = false;
+
+        for (int i = 0; i < n_chunks; ++i)
+        {
+                const char* p = chunks[i].utf8;
+                int         L = chunks[i].len;
+                if (!p) continue;
+                if (L < 0) L = (int)std::strlen(p);
+                if (L <= 0) continue;
+
+                std::vector<uint32_t> cps;
+                DecodeUtf8(p, L, cps);
+                for (size_t k = 0; k < cps.size(); ++k)
+                {
+                        cp_color.push_back(chunks[i].color_id);
+                        if (IsArabicCp(cps[k])) hasArabic = true;
+                }
+                concat.append(p, p + L);
+        }
+
+        if (cp_color.empty()) return 0.0f;
+
+        // 2. If there's no Arabic at all the original logical order is
+        //    correct; emit each chunk as its own visual run to preserve
+        //    fast-path width arithmetic.
+        if (!hasArabic)
+        {
+                float x = 0.0f;
+                for (int i = 0; i < n_chunks; ++i)
+                {
+                        const char* p = chunks[i].utf8;
+                        int L = chunks[i].len;
+                        if (!p) continue;
+                        if (L < 0) L = (int)std::strlen(p);
+                        if (L <= 0) continue;
+                        x += draw_run(p, L, chunks[i].color_id, x, user);
+                }
+                return x;
+        }
+
+        // 3. Shape + BiDi-reorder the whole concatenated string.
+        std::string visual_utf8;
+        std::vector<int> src_cp;
+        int src_cp_count = 0;
+        ShapeWithSourceMap(concat.c_str(), (int)concat.size(),
+                           visual_utf8, src_cp, &src_cp_count);
+
+        // Sanity-check: the colour array must be at least src_cp_count
+        // entries long. If for some reason it isn't (shouldn't happen),
+        // fall back to logical order to avoid OOB reads.
+        if ((int)cp_color.size() != src_cp_count)
+        {
+                float x = 0.0f;
+                for (int i = 0; i < n_chunks; ++i)
+                {
+                        const char* p = chunks[i].utf8;
+                        int L = chunks[i].len;
+                        if (!p) continue;
+                        if (L < 0) L = (int)std::strlen(p);
+                        if (L <= 0) continue;
+                        x += draw_run(p, L, chunks[i].color_id, x, user);
+                }
+                return x;
+        }
+
+        // 4. Walk the visual UTF-8, grouping consecutive codepoints with
+        //    the same source colour into one drawn run.
+        const char* vp     = visual_utf8.c_str();
+        const char* vend   = vp + visual_utf8.size();
+        int         out_cp = 0;
+        float       x_off  = 0.0f;
+
+        while (vp < vend)
+        {
+                uint32_t color = cp_color[src_cp[out_cp]];
+                const char* run_begin = vp;
+
+                // Advance over one codepoint at a time while the colour
+                // (looked up via src_cp[out_cp]) stays the same.
+                while (vp < vend)
+                {
+                        uint8_t b = (uint8_t)*vp;
+                        int step = 1;
+                        if      ((b & 0x80) == 0x00) step = 1;
+                        else if ((b & 0xE0) == 0xC0) step = 2;
+                        else if ((b & 0xF0) == 0xE0) step = 3;
+                        else if ((b & 0xF8) == 0xF0) step = 4;
+
+                        if (vp + step > vend) break;
+                        if (cp_color[src_cp[out_cp]] != color) break;
+
+                        vp     += step;
+                        out_cp += 1;
+                }
+
+                int run_len = (int)(vp - run_begin);
+                if (run_len > 0)
+                        x_off += draw_run(run_begin, run_len, color, x_off, user);
+        }
+
+        return x_off;
 }
