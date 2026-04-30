@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout android:background="@drawable/havana_loading_server" android:clickable="true" android:layout_width="fill_parent" android:layout_height="fill_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <ImageView android:layout_width="fill_parent" android:layout_height="fill_parent" android:src="@drawable/havana_loading_server" android:scaleType="centerCrop" />
+    <LinearLayout android:gravity="center" android:layout_gravity="bottom" android:orientation="vertical" android:background="#b0000000" android:layout_width="fill_parent" android:layout_height="96.0dip" android:paddingStart="42.0dip" android:paddingEnd="42.0dip">
+        <ProgressBar android:id="@id/progressBar1" android:layout_width="fill_parent" android:layout_height="9.0dip" android:indeterminate="true" android:progressDrawable="@drawable/havana_progressbar" style="progressBarStyleHorizontal" />
+    </LinearLayout>
+</FrameLayout>

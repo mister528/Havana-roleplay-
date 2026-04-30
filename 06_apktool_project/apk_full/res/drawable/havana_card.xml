@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:top="5.0dip">
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/havana_radius_lg" />
+            <solid android:color="#66000000" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/havana_radius_lg" />
+            <gradient android:startColor="@color/havana_surface_glass" android:endColor="@color/havana_surface" android:angle="270.0" android:type="linear" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/havana_radius_lg" />
+            <stroke android:width="@dimen/havana_stroke" android:color="@color/havana_border" />
+        </shape>
+    </item>
+</layer-list>
