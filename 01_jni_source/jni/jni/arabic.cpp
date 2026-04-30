@@ -89,6 +89,49 @@ namespace
                        (cp >= 0xFE70 && cp <= 0xFEFF);
         }
 
+        // True only for *unshaped* Arabic in the basic block. We use this
+        // to decide whether a string actually needs the shape + BiDi pass.
+        // Presentation forms (U+FE70..U+FEFF, U+FB50..U+FDFF) have already
+        // been shaped + reordered by an earlier call (or by an upstream
+        // server hack) and re-running the pass on them would reverse the
+        // visual order a second time, producing the garbled output the
+        // user sees on admin notifications etc.
+        bool NeedsBidi(uint32_t cp)
+        {
+                return cp >= 0x0600 && cp <= 0x06FF;
+        }
+
+        // Mirror table for bracket characters that end up resolved as
+        // RTL.  When we paint an RTL run we walk it right-to-left, so an
+        // opening bracket at the logical start of an RTL chunk needs to
+        // be drawn as the corresponding closing bracket so the bracket
+        // pair still "opens" on the correct side when read RTL.  Only
+        // the ASCII bracket pairs are common in chat, but the few BMP
+        // pairs that appear in Arabic content are included for safety.
+        uint32_t MirrorBracket(uint32_t cp)
+        {
+                switch (cp)
+                {
+                        case '(':    return ')';
+                        case ')':    return '(';
+                        case '[':    return ']';
+                        case ']':    return '[';
+                        case '{':    return '}';
+                        case '}':    return '{';
+                        case '<':    return '>';
+                        case '>':    return '<';
+                        case 0x00AB: return 0x00BB; // « »
+                        case 0x00BB: return 0x00AB;
+                        case 0x2039: return 0x203A; // ‹ ›
+                        case 0x203A: return 0x2039;
+                        case 0x2329: return 0x232A;
+                        case 0x232A: return 0x2329;
+                        case 0x27E8: return 0x27E9;
+                        case 0x27E9: return 0x27E8;
+                        default:     return cp;
+                }
+        }
+
         // Mapping of base Arabic letters (U+0621..U+064A and a few extended)
         // to {isolated, final, initial, medial} presentation forms.
         // 0 means "no such form, fall back to isolated".
@@ -364,6 +407,84 @@ namespace
                 else if (isStrongLtr(ligatured[k])) dir[k] = 'L';
         }
 
+        // ---- Unicode BiDi rule N0: paired bracket resolution. ----
+        // Match opening / closing brackets with a stack and assign both
+        // brackets in a pair the direction of the strong characters they
+        // enclose.  This stops a Latin name in parens (e.g. "(ahmadgatga)")
+        // from having one bracket attached to the surrounding Arabic run
+        // and the other to the Latin run, which is what produced the
+        // "]ahmadgatga) [0(" garbage before the fix.
+        auto bracketKind = [](uint32_t cp) -> int {
+                // returns +1 for opener, -1 for closer, 0 otherwise
+                switch (cp) {
+                        case '(': case '[': case '{':
+                        case 0x00AB: case 0x2039:
+                        case 0x2329: case 0x27E8:
+                                return +1;
+                        case ')': case ']': case '}':
+                        case 0x00BB: case 0x203A:
+                        case 0x232A: case 0x27E9:
+                                return -1;
+                }
+                return 0;
+        };
+        auto bracketsMatch = [](uint32_t op, uint32_t cl) {
+                return (op == '('    && cl == ')')    ||
+                       (op == '['    && cl == ']')    ||
+                       (op == '{'    && cl == '}')    ||
+                       (op == 0x00AB && cl == 0x00BB) ||
+                       (op == 0x2039 && cl == 0x203A) ||
+                       (op == 0x2329 && cl == 0x232A) ||
+                       (op == 0x27E8 && cl == 0x27E9);
+        };
+        struct BPair { size_t open_idx, close_idx; };
+        std::vector<BPair> bpairs;
+        {
+                std::vector<size_t> stack;
+                for (size_t i = 0; i < N; ++i)
+                {
+                        int kind = bracketKind(ligatured[i]);
+                        if (kind == +1) {
+                                stack.push_back(i);
+                        } else if (kind == -1) {
+                                // Pop entries from the stack until we find a
+                                // matching opener.  This mirrors the Unicode
+                                // BD16 algorithm closely enough for our use.
+                                for (size_t s = stack.size(); s-- > 0; )
+                                {
+                                        if (bracketsMatch(ligatured[stack[s]],
+                                                          ligatured[i]))
+                                        {
+                                                bpairs.push_back({stack[s], i});
+                                                stack.resize(s);
+                                                break;
+                                        }
+                                }
+                        }
+                }
+        }
+        // For every pair, look at the strong-direction characters between
+        // the brackets and assign both brackets that direction.  An L
+        // wins over R only when the pair contains no R at all (the rule
+        // is biased toward the paragraph direction, which is RTL here).
+        for (size_t p = 0; p < bpairs.size(); ++p)
+        {
+                char hasR = 0, hasL = 0;
+                for (size_t q = bpairs[p].open_idx + 1; q < bpairs[p].close_idx; ++q)
+                {
+                        if (dir[q] == 'R') { hasR = 1; }
+                        if (dir[q] == 'L') { hasL = 1; }
+                }
+                char take = 0;
+                if      (hasR) take = 'R';
+                else if (hasL) take = 'L';
+                if (take)
+                {
+                        dir[bpairs[p].open_idx ] = take;
+                        dir[bpairs[p].close_idx] = take;
+                }
+        }
+
         // Resolve neutrals: a run of neutrals between two strongs of the same
         // direction takes that direction; otherwise it takes the paragraph
         // direction (RTL here).
@@ -410,7 +531,10 @@ namespace
                 {
                         for (size_t q = run.hi; q-- > run.lo; )
                         {
-                                out_visual.push_back(ligatured[q]);
+                                // Mirror brackets that ended up in the
+                                // RTL run so they still "open" on the
+                                // correct side when read right-to-left.
+                                out_visual.push_back(MirrorBracket(ligatured[q]));
                                 out_src.push_back(ligatured_src[q]);
                         }
                 }
@@ -442,6 +566,14 @@ std::string Arabic::Shape(const char* utf8, int len)
         DecodeUtf8(utf8, len, cps);
         if (cps.empty()) return std::string();
 
+        // Mirror the gating logic from ShapeWithSourceMap so callers that
+        // hand us pre-shaped text (presentation forms only) get back the
+        // exact same bytes instead of a re-reversed copy.
+        bool needs_bidi = false;
+        for (size_t i = 0; i < cps.size(); ++i)
+                if (NeedsBidi(cps[i])) { needs_bidi = true; break; }
+        if (!needs_bidi) return std::string(utf8, utf8 + len);
+
         std::vector<uint32_t> visual;
         std::vector<int>      src;
         ShapeCodepoints(cps, visual, src);
@@ -470,14 +602,16 @@ void Arabic::ShapeWithSourceMap(const char* utf8, int len,
         std::vector<uint32_t> visual;
 
         // Only run the BiDi/shape pass when the paragraph actually has
-        // Arabic; otherwise rendering RTL-context rules onto a pure LTR
-        // line would mis-place punctuation.
-        bool hasArabic = false;
+        // *unshaped* Arabic; otherwise rendering RTL-context rules onto a
+        // pure LTR line would mis-place punctuation, and re-running the
+        // pass on already-shaped (presentation form) text would reverse
+        // the visual order a second time.
+        bool needs_bidi = false;
         for (size_t i = 0; i < cps.size(); ++i)
-                if (IsArabicCp(cps[i])) { hasArabic = true; break; }
+                if (NeedsBidi(cps[i])) { needs_bidi = true; break; }
 
-        if (hasArabic) ShapeCodepoints(cps, visual, out_src_cp_idx);
-        else           PassThroughCodepoints(cps, visual, out_src_cp_idx);
+        if (needs_bidi) ShapeCodepoints(cps, visual, out_src_cp_idx);
+        else            PassThroughCodepoints(cps, visual, out_src_cp_idx);
 
         out_utf8.reserve(visual.size() * 2);
         for (size_t k = 0; k < visual.size(); ++k) EncodeUtf8(visual[k], out_utf8);
@@ -501,7 +635,7 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
         //    a per-source-codepoint colour array.
         std::string concat;
         std::vector<uint32_t> cp_color;
-        bool hasArabic = false;
+        bool needs_bidi = false;
 
         for (int i = 0; i < n_chunks; ++i)
         {
@@ -516,17 +650,19 @@ float Arabic::RenderColouredLine(const ColouredChunk* chunks, int n_chunks,
                 for (size_t k = 0; k < cps.size(); ++k)
                 {
                         cp_color.push_back(chunks[i].color_id);
-                        if (IsArabicCp(cps[k])) hasArabic = true;
+                        if (NeedsBidi(cps[k])) needs_bidi = true;
                 }
                 concat.append(p, p + L);
         }
 
         if (cp_color.empty()) return 0.0f;
 
-        // 2. If there's no Arabic at all the original logical order is
-        //    correct; emit each chunk as its own visual run to preserve
-        //    fast-path width arithmetic.
-        if (!hasArabic)
+        // 2. If there's no *unshaped* Arabic at all the input is either
+        //    pure LTR or pre-shaped/pre-reordered text; either way the
+        //    chunks are already in visual paint order and we hand them
+        //    to the renderer untouched. (Running the BiDi pass on
+        //    presentation forms would reverse them a second time.)
+        if (!needs_bidi)
         {
                 float x = 0.0f;
                 for (int i = 0; i < n_chunks; ++i)
