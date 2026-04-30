@@ -1,4 +1,7 @@
 #include "../main.h"
+#include "../arabic.h"
+#include <string>
+#include <cstring>
 #include "game.h"
 #include "../util/armhook.h"
 
@@ -496,7 +499,8 @@ void CGame::RequestAnimation(char *szAnimFile)
 void CGame::DisplayGameText(char* szStr, int iTime, int iType)
 {
 	ScriptCommand(&text_clear_all);
-	CFont::AsciiToGxtChar(szStr, szGameTextMessage);
+	std::string __reorderedGT = Arabic::BidiReorderKeepBaseForms(szStr, (int)strlen(szStr));
+	CFont::AsciiToGxtChar((char*)__reorderedGT.c_str(), szGameTextMessage);
 
 	// CMessages::AddBigMesssage
 	(( void (*)(uint16_t*, int, int))(g_libGTASA+0x4D18C0+1))(szGameTextMessage, iTime, iType);
