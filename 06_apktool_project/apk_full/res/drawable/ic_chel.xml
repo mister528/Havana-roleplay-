@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector android:height="10.0dip" android:width="7.0dip" android:viewportWidth="7.0" android:viewportHeight="10.0"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt">
+    <path android:fillColor="@color/ic_chel__0" android:pathData="M3.3519,4.8981C4.3319,4.8981 5.1263,3.9332 5.1263,2.7429C5.1263,1.5525 4.8655,0.5876 3.3519,0.5876C1.8383,0.5876 1.5774,1.5525 1.5774,2.7429C1.5774,3.9332 2.3719,4.8981 3.3519,4.8981Z" />
+    <path android:fillColor="@color/ic_chel__1" android:pathData="M0.0003,8.1882C0,8.1171 -0.0003,8.1682 0.0003,8.1882V8.1882Z" />
+    <path android:fillColor="@color/ic_chel__2" android:pathData="M6.7033,8.2458C6.7043,8.2259 6.7037,8.1077 6.7033,8.2458V8.2458Z" />
+    <path android:fillColor="@color/ic_chel__3" android:pathData="M6.6995,8.1019C6.6666,6.0283 6.3958,5.4375 4.3235,5.0635C4.3235,5.0635 4.0318,5.4352 3.3518,5.4352C2.6719,5.4352 2.3801,5.0635 2.3801,5.0635C0.3304,5.4334 0.0431,6.0155 0.0054,8.0345C0.0023,8.1994 0.0008,8.2081 0.0003,8.1889C0.0004,8.2248 0.0006,8.2911 0.0006,8.4068C0.0006,8.4068 0.4939,9.4014 3.3518,9.4014C6.2097,9.4014 6.7031,8.4068 6.7031,8.4068C6.7031,8.3325 6.7031,8.2808 6.7032,8.2457C6.7027,8.2575 6.7016,8.2346 6.6995,8.1019Z" />
+</vector>

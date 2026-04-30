@@ -1,0 +1,38 @@
+================================================================
+  HavanaRp - APK Signing Info
+================================================================
+
+Keystore file:        havana.keystore
+Keystore password:    havana123
+Key alias:            havana
+Key password:         havana123
+
+Certificate (Signer #1) SHA-256 fingerprint:
+    59:63:0a:15:84:bf:a9:9f:8a:f3:75:72:a4:74:a1:87:
+    23:3a:1e:9f:5d:71:16:7c:79:6d:8f:78:60:60:eb:4f
+
+>>> The APK MUST be signed with this keystore so the new build is
+    accepted as an update for installed players (same fingerprint).
+
+----------------------------------------------------------------
+ Manual sign command (after `apktool b` + `zipalign`):
+----------------------------------------------------------------
+    apksigner sign \
+        --ks            havana.keystore \
+        --ks-key-alias  havana \
+        --ks-pass       pass:havana123 \
+        --key-pass      pass:havana123 \
+        --v1-signing-enabled true \
+        --v2-signing-enabled true \
+        --v3-signing-enabled true \
+        --out           HavanaRp.apk \
+        HavanaRp.aligned.apk
+
+----------------------------------------------------------------
+ Verify command:
+----------------------------------------------------------------
+    apksigner verify --print-certs HavanaRp.apk
+
+The "Signer #1 certificate SHA-256 digest" output line MUST match
+the fingerprint at the top of this file.
+================================================================

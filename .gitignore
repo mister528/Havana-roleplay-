@@ -1,0 +1,12 @@
+# Build artifacts
+01_jni_source/jni/obj/
+01_jni_source/jni/libs/
+04_final_apk/*.apk
+05_gamemode/*.amx
+06_apktool_project/apk_full/build/
+06_apktool_project/apktool_*.jar
+
+# Editor
+.vscode/
+*.swp
+*.bak

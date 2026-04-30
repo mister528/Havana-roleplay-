@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.cardview.widget.CardView android:layout_width="180.0dip" android:layout_height="112.0dip" android:layout_marginEnd="12.0dip" app:cardBackgroundColor="@android:color/transparent" app:cardCornerRadius="14.0dip" app:cardElevation="0.0dip"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <ImageView android:id="@id/ivNewsImage" android:layout_width="fill_parent" android:layout_height="fill_parent" android:src="@drawable/test_news" android:scaleType="centerCrop" />
+    <View android:background="@drawable/havana_news_scrim" android:layout_width="fill_parent" android:layout_height="fill_parent" />
+    <View android:background="@drawable/havana_news_border" android:layout_width="fill_parent" android:layout_height="fill_parent" />
+    <TextView android:textSize="11.0sp" android:textColor="#ffffffff" android:ellipsize="end" android:layout_gravity="start|bottom|center" android:id="@id/tvNewsText" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_margin="12.0dip" android:text="HavanaRp News" android:maxLines="2" android:shadowColor="#ff000000" android:shadowDx="0.0" android:shadowDy="1.0" android:shadowRadius="4.0" android:fontFamily="@font/montserrat_bold" />
+</androidx.cardview.widget.CardView>

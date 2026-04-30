@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector android:height="17.0dip" android:width="18.0dip" android:viewportWidth="18.0" android:viewportHeight="17.0"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt">
+    <path android:fillColor="@color/ic_settingd_activ__0" android:pathData="M9.2903,14.5161h8.7097v1.1613h-8.7097z" />
+    <path android:fillColor="@color/ic_settingd_activ__1" android:pathData="M0,14.5161h5.2258v1.1613h-5.2258z" />
+    <path android:fillColor="@color/ic_settingd_activ__2" android:pathData="M13.3548,6.3871l-3.4839,0l-0,3.4839l3.4839,0z" />
+    <path android:fillColor="@color/ic_settingd_activ__3" android:pathData="M8.7097,7.5483l-8.7097,0l-0,1.1613l8.7097,0z" />
+    <path android:fillColor="@color/ic_settingd_activ__4" android:pathData="M18,7.5483l-5.2258,0l-0,1.1613l5.2258,0z" />
+    <path android:fillColor="@color/ic_settingd_activ__5" android:pathData="M4.6452,0h3.4839v3.4839h-3.4839z" />
+    <path android:fillColor="@color/ic_settingd_activ__6" android:pathData="M9.2903,1.1612h8.7097v1.1613h-8.7097z" />
+    <path android:fillColor="@color/ic_settingd_activ__7" android:pathData="M0,1.1612h5.2258v1.1613h-5.2258z" />
+    <path android:fillColor="@color/ic_settingd_activ__8" android:pathData="M4.6452,13.3549h3.4839v3.4839h-3.4839z" />
+</vector>
