@@ -17,33 +17,30 @@
 #define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
 // --- speed tuning ---
-// STALLION's stock client-side handling tops out at ~160 km/h. We push it
-// to 250 by adding a SMALL ADDITIVE forward thrust each tick. Additive (not
-// multiplicative) is the key trick: it doesn't amplify the existing velocity
-// vector — the car's lateral skid, drift, and turning are completely
-// untouched, so steering feels exactly like a stock vehicle. We just stack a
-// constant little forward shove on top of vanilla physics every tick.
+// Design notes (after research on Project Cerbera, sampwiki, sampforum):
 //
-// On top of that, we *reduce* the thrust whenever the car is turning (high
-// angular yaw velocity) so a hard cornering car doesn't keep getting pushed
-// into the curve and fly out of it.
+// SA-MP's professional pattern for "a faster car" is to ship a modified
+// handling.cfg that the client loads, NOT to override velocity from the
+// server every tick. Server-side SetVehicleVelocity is rate-limited by the
+// network update tick, so doing it 4-8 times per second snaps the client's
+// physics simulation and makes turning/driving feel jittery.
 //
-// Off-gas detection by velocity-delta keeps coast/brake feeling natural.
+// We split the work in two:
+//   1) CLIENT (handling.cfg patch in patch_8000_azelow/): a tuned STALLION
+//      line with higher TopSpeed, sharper Acceleration and better grip. This
+//      is what gives the car its "fast & planted" feel during normal driving.
+//   2) SERVER (this file): a *very* gentle additive thrust at a low frequency
+//      (1 Hz) so the client physics has 999ms to settle naturally between
+//      each touch. We only push forward, only when actively driving above the
+//      min speed, and only enough to overcome any residual handling.cfg cap.
+//
+// Result: smooth vanilla-feel turning + steady climb to AZELOW_MAX_SPEED.
 #define AZELOW_MAX_SPEED       250.0   // km/h hard cap
-#define AZELOW_MIN_BOOST        15.0   // km/h - thrust only above this
-#define AZELOW_THRUST           0.025  // SA-MP velocity units added per tick
-                                       // (0.025 * 180 ≈ +4.5 km/h per tick)
-#define AZELOW_DECEL_THRESH     3.0    // km/h drop/tick that = off-gas
-#define AZELOW_TURN_THRESH     30.0   // deg/s yaw above which we damp thrust
-#define AZELOW_TURN_FULL_DAMP  90.0   // deg/s where damping reaches its floor
-#define AZELOW_TURN_MIN_SCALE   0.20  // floor on thrust during sharpest turn
-// Lateral grip: fraction of sideways velocity removed every tick.
-// 0.0 = vanilla SA-MP slide,  1.0 = on-rails (no slip at all).
-// 0.85 means we erase 85% of any sideways skid each tick = the car holds
-// its racing line tight without becoming completely stuck to it.
-#define AZELOW_GRIP             0.85
-// Tick rate (ms). 250ms gives smoother accel feel than 500ms without much CPU.
-#define AZELOW_TICK_MS          250
+#define AZELOW_MIN_BOOST        20.0   // km/h - thrust only above this
+#define AZELOW_THRUST           0.045  // SA-MP velocity units added per tick
+                                       // (0.045 * 180 ≈ +8 km/h per tick)
+#define AZELOW_DECEL_THRESH     5.0    // km/h drop/tick that = off-gas
+#define AZELOW_TICK_MS         1000    // 1 Hz → client physics stays smooth
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
 #define VEL_TO_KMH         180.0
@@ -71,10 +68,6 @@ new gEngineTimer = -1;
 // Used to detect whether the car is accelerating (gas) or decelerating
 // (off-gas / braking). Reset on disconnect / state change.
 new Float:gAzelowLastSpeed[MAX_PLAYERS];
-
-// Last measured Z angle per player. Used to derive the turn rate
-// (degrees/sec) for thrust damping during sharp corners.
-new Float:gAzelowLastZ[MAX_PLAYERS];
 
 
 // -----------------------------------------------------------------------------
@@ -139,9 +132,7 @@ public  AzelowEngineTick()
     new Float:minBoost     = AZELOW_MIN_BOOST      / VEL_TO_KMH;
     new Float:decelThresh  = -AZELOW_DECEL_THRESH  / VEL_TO_KMH;
 
-    // Scale the per-tick thrust by the actual tick interval so retuning
-    // AZELOW_TICK_MS won't change the overall acceleration feel.
-    new Float:thrustBase = AZELOW_THRUST * (float(AZELOW_TICK_MS) / 250.0);
+    new Float:thrust = AZELOW_THRUST;
 
     for (new p = 0; p < MAX_PLAYERS; p++)
     {
@@ -159,68 +150,43 @@ public  AzelowEngineTick()
         GetVehicleVelocity(vid, vx, vy, vz);
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
 
-        // --- accel detection via speed delta from previous tick ---
+        // --- accel detection: was the car still gaining speed since
+        //     last tick? if it dropped more than DECEL_THRESH km/h, the
+        //     player is off-gas / braking, so we don't push.
         new Float:lastSpeed = gAzelowLastSpeed[p];
         new Float:delta     = speed - lastSpeed;
         gAzelowLastSpeed[p] = speed;
         new bool:onGas = (delta > decelThresh);
 
-        // --- vehicle local frame: forward (fx,fy) and right (rx,ry) ---
+        // --- forward direction from the car's heading ---
         new Float:zAngle;
         GetVehicleZAngle(vid, zAngle);
         new Float:fx = -floatsin(zAngle, degrees);
         new Float:fy =  floatcos(zAngle, degrees);
-        new Float:rx =  floatcos(zAngle, degrees);
-        new Float:ry =  floatsin(zAngle, degrees);
-
-        // Decompose horizontal velocity into forward and lateral components.
         new Float:fwdSpeed = vx*fx + vy*fy;
-        new Float:latSpeed = vx*rx + vy*ry;
 
-        // --- lateral grip: kill sideways slide so the car stays planted ---
-        latSpeed *= (1.0 - AZELOW_GRIP);
-
-        // --- turning damping: derive yaw rate from Z-angle delta ---
-        // SA-MP doesn't expose GetVehicleAngularVelocity in this build, so
-        // we measure how many degrees the heading changed since last tick.
-        new Float:lastZ = gAzelowLastZ[p];
-        new Float:angleDiff = zAngle - lastZ;
-        if (angleDiff >  180.0) angleDiff -= 360.0;
-        if (angleDiff < -180.0) angleDiff += 360.0;
-        gAzelowLastZ[p] = zAngle;
-        new Float:turnRate = floatabs(angleDiff) * 1000.0 / float(AZELOW_TICK_MS);
-
-        new Float:turnScale = 1.0;
-        if (turnRate > AZELOW_TURN_THRESH)
+        // --- single gentle additive shove forward, then hands off ---
+        if (onGas && fwdSpeed > minBoost && speed < maxVel)
         {
-            // Linearly fade thrust between the two thresholds, then floor.
-            new Float:span = AZELOW_TURN_FULL_DAMP - AZELOW_TURN_THRESH;
-            turnScale = 1.0 - ((turnRate - AZELOW_TURN_THRESH) / span);
-            if (turnScale < AZELOW_TURN_MIN_SCALE) turnScale = AZELOW_TURN_MIN_SCALE;
+            new Float:nx = vx + fx * thrust;
+            new Float:ny = vy + fy * thrust;
+            new Float:nz = vz;
+            new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
+            if (newSpeed > maxVel)
+            {
+                new Float:k = maxVel / newSpeed;
+                nx *= k; ny *= k;
+            }
+            SetVehicleVelocity(vid, nx, ny, nz);
+            continue;
         }
 
-        // --- additive forward thrust when on gas ---
-        new Float:newFwd = fwdSpeed;
-        if (onGas && fwdSpeed > minBoost)
+        // --- safety cap when boost path didn't run ---
+        if (speed > maxVel)
         {
-            new Float:thrust = thrustBase * turnScale;
-            newFwd = fwdSpeed + thrust;
+            new Float:ratio = maxVel / speed;
+            SetVehicleVelocity(vid, vx * ratio, vy * ratio, vz * ratio);
         }
-
-        // --- rebuild horizontal velocity from forward + de-skidded lateral ---
-        new Float:nx = fx*newFwd + rx*latSpeed;
-        new Float:ny = fy*newFwd + ry*latSpeed;
-        new Float:nz = vz;
-
-        // --- hard cap on the resulting speed ---
-        new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
-        if (newSpeed > maxVel)
-        {
-            new Float:k = maxVel / newSpeed;
-            nx *= k; ny *= k;
-        }
-
-        SetVehicleVelocity(vid, nx, ny, nz);
     }
 }
 
@@ -234,7 +200,7 @@ public OnFilterScriptInit()
     print("[car_azelow] -------------------------------------------");
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
     print("[car_azelow]  Model ID: 439 (STALLION) | Open to all");
-    print("[car_azelow]  Speed cap: 250 km/h | Boost: +5%/tick | Fuel: infinite");
+    print("[car_azelow]  Speed cap: 250 km/h | Smooth thrust @1Hz | Fuel: infinite");
     print("[car_azelow] -------------------------------------------");
 
     new spawned = 0;
@@ -307,15 +273,11 @@ public OnPlayerStateChange(playerid, newstate, oldstate)
         {
             AzelowForceReady(vid);
             gAzelowLastSpeed[playerid] = 0.0;
-            new Float:zAngle;
-            GetVehicleZAngle(vid, zAngle);
-            gAzelowLastZ[playerid] = zAngle;
         }
     }
     else
     {
         gAzelowLastSpeed[playerid] = 0.0;
-        gAzelowLastZ[playerid]     = 0.0;
     }
     return 1;
 }
@@ -324,7 +286,6 @@ public OnPlayerDisconnect(playerid, reason)
 {
     #pragma unused reason
     gAzelowLastSpeed[playerid] = 0.0;
-    gAzelowLastZ[playerid]     = 0.0;
     return 1;
 }
 
