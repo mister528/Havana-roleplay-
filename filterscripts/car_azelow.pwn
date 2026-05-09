@@ -19,11 +19,11 @@
 // --- speed tuning ---
 // Stock STALLION handling.cfg tops out around 160 km/h on the client, so a
 // raw cap doesn't make the car faster. We *boost* the velocity vector each
-// timer tick when the driver is actively moving (above MIN_BOOST_KMH) so
-// the car genuinely accelerates harder. The cap MAX_SPEED is then enforced
-// after the boost so we never exceed it.
+// timer tick — but ONLY while the driver is actively pressing forward
+// (analog up / W / mobile stick forward). When the driver lets go or brakes
+// the car coasts/decelerates naturally with no server-side push.
 #define AZELOW_MAX_SPEED   250.0   // km/h hard cap (server-side)
-#define AZELOW_MIN_BOOST   50.0    // km/h - boost only kicks in above this
+#define AZELOW_MIN_BOOST   30.0    // km/h - boost only kicks in above this
 #define AZELOW_BOOST_MULT  1.05    // per-tick velocity multiplier (~+10%/sec)
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
@@ -126,8 +126,14 @@ public  AzelowEngineTick()
         GetVehicleVelocity(vid, vx, vy, vz);
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
 
-        // --- boost: amplify horizontal motion only (avoids vertical kicks) ---
-        if (speed > minBoost && speed < maxVel)
+        // --- read driver input. ud < 0 means analog up pressed (gas).
+        //     This works for PC (W / up arrow) and mobile (stick forward).
+        new keys, ud, lr;
+        GetPlayerKeys(p, keys, ud, lr);
+        new bool:throttle = (ud < 0);
+
+        // --- boost only while the driver is actively accelerating ---
+        if (throttle && speed > minBoost && speed < maxVel)
         {
             new Float:m  = AZELOW_BOOST_MULT;
             new Float:nx = vx * m;
@@ -143,7 +149,7 @@ public  AzelowEngineTick()
             continue;
         }
 
-        // --- hard cap when boost path didn't run ---
+        // --- hard cap (in case the car is already over due to slope/etc) ---
         if (speed > maxVel)
         {
             new Float:ratio = maxVel / speed;
