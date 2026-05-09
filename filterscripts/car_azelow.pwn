@@ -35,12 +35,20 @@
 //      min speed, and only enough to overcome any residual handling.cfg cap.
 //
 // Result: smooth vanilla-feel turning + steady climb to AZELOW_MAX_SPEED.
-#define AZELOW_MAX_SPEED       250.0   // km/h hard cap
-#define AZELOW_MIN_BOOST        20.0   // km/h - thrust only above this
+#define AZELOW_MAX_SPEED        250.0  // km/h hard cap
+#define AZELOW_MIN_BOOST         20.0  // km/h - thrust only above this
 #define AZELOW_THRUST           0.045  // SA-MP velocity units added per tick
                                        // (0.045 * 180 ≈ +8 km/h per tick)
-#define AZELOW_DECEL_THRESH     5.0    // km/h drop/tick that = off-gas
-#define AZELOW_TICK_MS         1000    // 1 Hz → client physics stays smooth
+#define AZELOW_DECEL_THRESH      5.0   // km/h drop/tick that = off-gas
+#define AZELOW_ACCEL_LIMIT      18.0   // km/h rise/tick above which we assume
+                                       // it's gravity (downhill), not engine.
+#define AZELOW_TURN_LIMIT       12.0   // degrees yaw/sec above which we skip
+                                       // thrust to avoid lateral push during
+                                       // hard turns.
+#define AZELOW_SLOPE_LIMIT      0.08   // |vz| above which we skip thrust
+                                       // because the car is on a slope and
+                                       // gravity is doing the work.
+#define AZELOW_TICK_MS          1000   // 1 Hz → client physics stays smooth
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
 #define VEL_TO_KMH         180.0
@@ -68,6 +76,11 @@ new gEngineTimer = -1;
 // Used to detect whether the car is accelerating (gas) or decelerating
 // (off-gas / braking). Reset on disconnect / state change.
 new Float:gAzelowLastSpeed[MAX_PLAYERS];
+
+// Last measured Z angle, used to derive yaw rate so we can suppress
+// thrust during sharp turns (otherwise the boost feels like a sideways
+// kick because it's applied along the heading vector mid-turn).
+new Float:gAzelowLastZ[MAX_PLAYERS];
 
 
 // -----------------------------------------------------------------------------
@@ -150,26 +163,52 @@ public  AzelowEngineTick()
         GetVehicleVelocity(vid, vx, vy, vz);
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
 
-        // --- accel detection: was the car still gaining speed since
-        //     last tick? if it dropped more than DECEL_THRESH km/h, the
-        //     player is off-gas / braking, so we don't push.
-        new Float:lastSpeed = gAzelowLastSpeed[p];
-        new Float:delta     = speed - lastSpeed;
-        gAzelowLastSpeed[p] = speed;
-        new bool:onGas = (delta > decelThresh);
+        // --- horizontal-only speed (ignores slope contribution) ---
+        new Float:hSpeed = floatsqroot(vx*vx + vy*vy);
 
-        // --- forward direction from the car's heading ---
+        // --- gas detection: speed must be in a reasonable band ---
+        //   * delta > decelThresh  → not off-gas / braking
+        //   * delta < accelLimit   → not free-falling down a hill
+        // The second guard kills the "slope boost" the user reported.
+        new Float:lastSpeed = gAzelowLastSpeed[p];
+        new Float:delta     = hSpeed - lastSpeed;
+        gAzelowLastSpeed[p] = hSpeed;
+        new Float:accelLimit = AZELOW_ACCEL_LIMIT / VEL_TO_KMH;
+        new bool:onGas = (delta > decelThresh && delta < accelLimit);
+
+        // --- yaw rate (deg/sec) since last tick ---
         new Float:zAngle;
         GetVehicleZAngle(vid, zAngle);
+        new Float:lastZ = gAzelowLastZ[p];
+        new Float:angleDiff = zAngle - lastZ;
+        if (angleDiff >  180.0) angleDiff -= 360.0;
+        if (angleDiff < -180.0) angleDiff += 360.0;
+        gAzelowLastZ[p] = zAngle;
+        new Float:turnRate = floatabs(angleDiff) * 1000.0 / float(AZELOW_TICK_MS);
+
+        // --- forward heading; project velocity onto it (signed) ---
         new Float:fx = -floatsin(zAngle, degrees);
         new Float:fy =  floatcos(zAngle, degrees);
         new Float:fwdSpeed = vx*fx + vy*fy;
 
-        // --- single gentle additive shove forward, then hands off ---
-        if (onGas && fwdSpeed > minBoost && speed < maxVel)
+        // --- decide whether to thrust this tick ---
+        new bool:doThrust =
+            onGas
+            && fwdSpeed > minBoost
+            && speed < maxVel
+            && hSpeed > 0.001
+            && turnRate < AZELOW_TURN_LIMIT          // not in a hard turn
+            && floatabs(vz) < AZELOW_SLOPE_LIMIT;    // not on a steep slope
+
+        if (doThrust)
         {
-            new Float:nx = vx + fx * thrust;
-            new Float:ny = vy + fy * thrust;
+            // Push along the actual VELOCITY direction (not heading) so a
+            // mid-turn boost doesn't appear as a sideways shove. The car
+            // gets faster in whatever direction it's actually traveling.
+            new Float:dirX = vx / hSpeed;
+            new Float:dirY = vy / hSpeed;
+            new Float:nx = vx + dirX * thrust;
+            new Float:ny = vy + dirY * thrust;
             new Float:nz = vz;
             new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
             if (newSpeed > maxVel)
@@ -181,7 +220,7 @@ public  AzelowEngineTick()
             continue;
         }
 
-        // --- safety cap when boost path didn't run ---
+        // --- safety cap (rarely hit because thrust is the boost path) ---
         if (speed > maxVel)
         {
             new Float:ratio = maxVel / speed;
@@ -273,11 +312,15 @@ public OnPlayerStateChange(playerid, newstate, oldstate)
         {
             AzelowForceReady(vid);
             gAzelowLastSpeed[playerid] = 0.0;
+            new Float:zAngle;
+            GetVehicleZAngle(vid, zAngle);
+            gAzelowLastZ[playerid] = zAngle;
         }
     }
     else
     {
         gAzelowLastSpeed[playerid] = 0.0;
+        gAzelowLastZ[playerid]     = 0.0;
     }
     return 1;
 }
@@ -286,6 +329,7 @@ public OnPlayerDisconnect(playerid, reason)
 {
     #pragma unused reason
     gAzelowLastSpeed[playerid] = 0.0;
+    gAzelowLastZ[playerid]     = 0.0;
     return 1;
 }
 
