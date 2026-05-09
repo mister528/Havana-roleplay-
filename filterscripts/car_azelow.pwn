@@ -37,6 +37,11 @@
 #define AZELOW_TURN_THRESH     30.0   // deg/s yaw above which we damp thrust
 #define AZELOW_TURN_FULL_DAMP  90.0   // deg/s where damping reaches its floor
 #define AZELOW_TURN_MIN_SCALE   0.20  // floor on thrust during sharpest turn
+// Lateral grip: fraction of sideways velocity removed every tick.
+// 0.0 = vanilla SA-MP slide,  1.0 = on-rails (no slip at all).
+// 0.85 means we erase 85% of any sideways skid each tick = the car holds
+// its racing line tight without becoming completely stuck to it.
+#define AZELOW_GRIP             0.85
 // Tick rate (ms). 250ms gives smoother accel feel than 500ms without much CPU.
 #define AZELOW_TICK_MS          250
 
@@ -160,14 +165,20 @@ public  AzelowEngineTick()
         gAzelowLastSpeed[p] = speed;
         new bool:onGas = (delta > decelThresh);
 
-        // --- forward direction from car's heading ---
+        // --- vehicle local frame: forward (fx,fy) and right (rx,ry) ---
         new Float:zAngle;
         GetVehicleZAngle(vid, zAngle);
         new Float:fx = -floatsin(zAngle, degrees);
         new Float:fy =  floatcos(zAngle, degrees);
+        new Float:rx =  floatcos(zAngle, degrees);
+        new Float:ry =  floatsin(zAngle, degrees);
 
-        // Forward velocity component (signed).
+        // Decompose horizontal velocity into forward and lateral components.
         new Float:fwdSpeed = vx*fx + vy*fy;
+        new Float:latSpeed = vx*rx + vy*ry;
+
+        // --- lateral grip: kill sideways slide so the car stays planted ---
+        latSpeed *= (1.0 - AZELOW_GRIP);
 
         // --- turning damping: derive yaw rate from Z-angle delta ---
         // SA-MP doesn't expose GetVehicleAngularVelocity in this build, so
@@ -188,30 +199,28 @@ public  AzelowEngineTick()
             if (turnScale < AZELOW_TURN_MIN_SCALE) turnScale = AZELOW_TURN_MIN_SCALE;
         }
 
-        // --- apply additive forward thrust ---
-        // Only when on gas, moving forward, below the cap.
-        if (onGas && fwdSpeed > minBoost && speed < maxVel)
+        // --- additive forward thrust when on gas ---
+        new Float:newFwd = fwdSpeed;
+        if (onGas && fwdSpeed > minBoost)
         {
             new Float:thrust = thrustBase * turnScale;
-            new Float:nx = vx + fx * thrust;
-            new Float:ny = vy + fy * thrust;
-            new Float:nz = vz;
-            new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
-            if (newSpeed > maxVel)
-            {
-                new Float:k = maxVel / newSpeed;
-                nx *= k; ny *= k;
-            }
-            SetVehicleVelocity(vid, nx, ny, nz);
-            continue;
+            newFwd = fwdSpeed + thrust;
         }
 
-        // --- hard cap (in case the car crests a slope above maxVel) ---
-        if (speed > maxVel)
+        // --- rebuild horizontal velocity from forward + de-skidded lateral ---
+        new Float:nx = fx*newFwd + rx*latSpeed;
+        new Float:ny = fy*newFwd + ry*latSpeed;
+        new Float:nz = vz;
+
+        // --- hard cap on the resulting speed ---
+        new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
+        if (newSpeed > maxVel)
         {
-            new Float:ratio = maxVel / speed;
-            SetVehicleVelocity(vid, vx * ratio, vy * ratio, vz * ratio);
+            new Float:k = maxVel / newSpeed;
+            nx *= k; ny *= k;
         }
+
+        SetVehicleVelocity(vid, nx, ny, nz);
     }
 }
 
