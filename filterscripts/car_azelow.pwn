@@ -8,15 +8,8 @@
 //  * Spawns three Azelow vehicles at the rich-family showroom in Rodeo (LS).
 //  * Adds /azelow              — teleports the player into the nearest one.
 //  * Adds /spawnazelow [color1] [color2]
-//                              — spawns a new Azelow in front of the caller (admin only).
+//                              — anyone can spawn an Azelow in front of them.
 //  * Logs every spawn/use to scriptfiles/car_azelow.log.
-//
-//  Admin check
-//  -----------
-//  /spawnazelow checks `users_admins.u_a_level >= 1` for the calling player
-//  in the same MySQL database the gamemode uses. RCON-logged players are
-//  always allowed. Admin level is cached at OnPlayerConnect; if the cache
-//  is missing we re-query on demand.
 //
 //  Why a separate filterscript
 //  ---------------------------
@@ -35,20 +28,10 @@
 // =============================================================================
 
 #include <a_samp>
-#include <a_mysql>
 #include <zcmd>
 
 #define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
-
-// MySQL credentials lifted from arabonline.pwn @ line 40617.
-// The gamemode opens its own pool on connection handle 1; we open a tiny
-// dedicated handle so we never collide with its query queue.
-#define AZELOW_SQL_HOST    "51.210.223.180"
-#define AZELOW_SQL_USER    "gs108396"
-#define AZELOW_SQL_PASS    "gs108396"
-#define AZELOW_SQL_DB      "2ymgifcr"
-#define AZELOW_SQL_POOL    1
 
 // Three spawn points around the rich-family Rodeo showroom (Los Santos).
 new const Float:gAzelowSpawns[][4] = {
@@ -59,17 +42,6 @@ new const Float:gAzelowSpawns[][4] = {
 };
 
 new gAzelowVehicleIds[sizeof(gAzelowSpawns)] = { -1, ... };
-
-// MySQL connection handle (own pool, separate from gamemode's).
-// R39-5 returns a plain int handle; <= 0 means failed/closed.
-#define AZELOW_SQL_INVALID  (0)
-new gAzelowSql = AZELOW_SQL_INVALID;
-
-// Per-player cached admin level.
-//   -1 = not yet queried (or query in flight)
-//    0 = not admin
-//    1..8 = admin level
-new gAzelowAdminLevel[MAX_PLAYERS];
 
 
 // -----------------------------------------------------------------------------
@@ -88,56 +60,6 @@ LogAzelow(const text[])
     fclose(fp);
 }
 
-stock IsPlayerAdminish(playerid)
-{
-    if (IsPlayerAdmin(playerid)) return 1;          // RCON-logged-in players
-    if (gAzelowAdminLevel[playerid] >= 1) return 1; // gamemode admin (DB-backed)
-    return 0;
-}
-
-// Fire an async query for `name`'s admin level. Result is captured in
-// OnAzelowAdminLoaded(playerid).
-stock AzelowQueryAdmin(playerid)
-{
-    if (gAzelowSql == AZELOW_SQL_INVALID) return;
-    if (!IsPlayerConnected(playerid)) return;
-
-    new name[MAX_PLAYER_NAME];
-    GetPlayerName(playerid, name, sizeof(name));
-
-    new query[160];
-    mysql_format(gAzelowSql, query, sizeof(query),
-        "SELECT `u_a_level` FROM `users_admins` WHERE `u_a_name` = '%e' LIMIT 1",
-        name);
-    mysql_pquery(gAzelowSql, query, "OnAzelowAdminLoaded", "d", playerid);
-}
-
-forward OnAzelowAdminLoaded(playerid);
-public  OnAzelowAdminLoaded(playerid)
-{
-    if (!IsPlayerConnected(playerid))
-    {
-        gAzelowAdminLevel[playerid] = -1;
-        return 1;
-    }
-
-    new rows = cache_num_rows();
-    if (rows < 1)
-    {
-        gAzelowAdminLevel[playerid] = 0;
-        return 1;
-    }
-
-    new lvl = cache_get_field_content_int(0, "u_a_level", gAzelowSql);
-    gAzelowAdminLevel[playerid] = lvl;
-
-    new buf[96], name[MAX_PLAYER_NAME];
-    GetPlayerName(playerid, name, sizeof(name));
-    format(buf, sizeof(buf), "Admin level %d cached for %s", lvl, name);
-    LogAzelow(buf);
-    return 1;
-}
-
 
 // -----------------------------------------------------------------------------
 // hooks
@@ -148,31 +70,8 @@ public OnFilterScriptInit()
     print("[car_azelow] -------------------------------------------");
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
     print("[car_azelow]  Model ID: 439 (STALLION slot, replaced by Azelow)");
+    print("[car_azelow]  /spawnazelow is open to all players.");
     print("[car_azelow] -------------------------------------------");
-
-    // Open a dedicated MySQL pool. Handle is independent of the gamemode's.
-    gAzelowSql = mysql_connect(
-        AZELOW_SQL_HOST, AZELOW_SQL_USER, AZELOW_SQL_DB, AZELOW_SQL_PASS,
-        3306, true, AZELOW_SQL_POOL);
-
-    if (gAzelowSql <= AZELOW_SQL_INVALID)
-    {
-        gAzelowSql = AZELOW_SQL_INVALID;
-        print("[car_azelow]  WARNING: MySQL connect failed - admin check disabled.");
-        LogAzelow("OnFilterScriptInit: MySQL connect FAILED");
-    }
-    else
-    {
-        print("[car_azelow]  MySQL: connected to users_admins lookup pool.");
-        LogAzelow("OnFilterScriptInit: MySQL connected");
-    }
-
-    for (new i = 0; i < MAX_PLAYERS; i++) gAzelowAdminLevel[i] = -1;
-
-    // Players already on the server when /loadfs runs need a re-query.
-    for (new i = 0; i < MAX_PLAYERS; i++)
-        if (IsPlayerConnected(i))
-            AzelowQueryAdmin(i);
 
     new spawned = 0;
     for (new i = 0; i < sizeof(gAzelowSpawns); i++)
@@ -205,33 +104,7 @@ public OnFilterScriptExit()
             gAzelowVehicleIds[i] = -1;
         }
     }
-
-    if (gAzelowSql != AZELOW_SQL_INVALID)
-    {
-        mysql_close(gAzelowSql);
-        gAzelowSql = AZELOW_SQL_INVALID;
-    }
-
-    LogAzelow("OnFilterScriptExit: cleaned up Azelows + MySQL");
-    return 1;
-}
-
-public OnPlayerConnect(playerid)
-{
-    gAzelowAdminLevel[playerid] = -1;
-    // Defer the actual lookup a bit so the gamemode's own login flow (which
-    // populates `users_admins` with rows for new admins) finishes first.
-    SetTimerEx("AzelowQueryAdminTimed", 4000, false, "d", playerid);
-    return 1;
-}
-
-forward AzelowQueryAdminTimed(playerid);
-public  AzelowQueryAdminTimed(playerid) { AzelowQueryAdmin(playerid); }
-
-public OnPlayerDisconnect(playerid, reason)
-{
-    #pragma unused reason
-    gAzelowAdminLevel[playerid] = -1;
+    LogAzelow("OnFilterScriptExit: cleaned up Azelows");
     return 1;
 }
 
@@ -281,23 +154,6 @@ CMD:azelow(playerid, params[])
 
 CMD:spawnazelow(playerid, params[])
 {
-    // If the cache is still cold (admin just connected, or filterscript was
-    // just /loadfs'd), trigger a fresh query and ask the player to retry.
-    if (gAzelowAdminLevel[playerid] < 0)
-    {
-        AzelowQueryAdmin(playerid);
-        SendClientMessage(playerid, 0xFFC864FF,
-            "{FFC864}* Checking admin status, try again in 1-2 seconds.");
-        return 1;
-    }
-
-    if (!IsPlayerAdminish(playerid))
-    {
-        SendClientMessage(playerid, 0xFF6464FF,
-            "{FF6464}* /spawnazelow is for admins only.");
-        return 1;
-    }
-
     new col1 = -1, col2 = -1;
     if (params[0] != EOS) sscanf_two_ints(params, col1, col2);
 
@@ -324,8 +180,8 @@ CMD:spawnazelow(playerid, params[])
     SendClientMessage(playerid, 0x66FF66FF, buf);
 
     format(buf, sizeof(buf),
-        "Admin %s (lvl %d) spawned Azelow vid=%d at (%.1f,%.1f,%.1f)",
-        name, gAzelowAdminLevel[playerid], vid, fx, fy, pz);
+        "%s spawned Azelow vid=%d at (%.1f,%.1f,%.1f)",
+        name, vid, fx, fy, pz);
     LogAzelow(buf);
     return 1;
 }
