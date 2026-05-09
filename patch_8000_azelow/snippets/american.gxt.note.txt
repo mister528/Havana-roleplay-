@@ -1,0 +1,15 @@
+american.gxt — vehicle name in the in-game HUD/menu
+
+Use the GXT Editor 1.2 to open text/american.gxt:
+
+1. Open the MAIN block.
+2. Запись → Добавить (Record → Add).
+3. Key:   AZELOW
+   Value: Daewoo Gentra Azelow
+4. Save.
+
+If you also want a Russian/Arabic name, run GXT Russian Translator
+(Translator.exe), enter the name in the top field, click "Convert to SA",
+and paste the converted text as the value instead — GTA SA only renders
+the bundled fonts so non-Latin alphabets must be transliterated through
+the converter.

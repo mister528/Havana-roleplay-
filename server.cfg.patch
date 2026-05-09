@@ -1,0 +1,14 @@
+# server.cfg patch — append "car_azelow" to the existing filterscripts line.
+#
+# Current (FTP /server.cfg):
+#   filterscripts inv_ui helmet vice ipdata bank_ui
+#
+# After:
+#   filterscripts inv_ui helmet vice ipdata bank_ui car_azelow
+#
+# Apply by either:
+#   - editing server.cfg manually on the FTP, OR
+#   - running deploy/deploy_to_ftp.sh which calls the lftp script below.
+#
+# The order matters: car_azelow loads last, so it does not interfere with
+# bank_ui's textdraws.

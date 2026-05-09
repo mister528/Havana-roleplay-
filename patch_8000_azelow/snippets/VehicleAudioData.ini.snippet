@@ -1,0 +1,30 @@
+# VehicleAudioData.ini — required when the player has SA More Vehicles plugin.
+#
+# 1) FIRST, in the [IDs] block at the top of the file, change:
+#       Number_of_pairs=1
+#       FromID_1=400
+#       ToID_1=615        ; <-- old default; sounds break for IDs > 615
+#    TO:
+#       Number_of_pairs=1
+#       FromID_1=400
+#       ToID_1=19000      ; <-- enables engine + horn sounds for custom IDs
+#
+# 2) THEN append the following block at the end of the file:
+
+[8000]
+CarType=0
+EngineOnSound=99
+EngineOffSound=98
+Unknown4=0
+Unknown5=0,779999971389771
+Unknown6=1
+HornTon=7
+HornHigh=1
+DoorSound=2
+RadioNum=8
+RadioType=0
+Unknown12=0
+Unknown13=0
+Unknown14=0
+Unknown15=0
+Unknown16=0
