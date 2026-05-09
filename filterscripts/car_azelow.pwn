@@ -17,21 +17,31 @@
 #define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
 // --- speed tuning ---
-// Stock STALLION handling.cfg tops out around 160 km/h on the client, so a
-// raw cap doesn't make the car faster. We *boost* the velocity vector each
-// timer tick whenever the driver is on the gas (speed is steady or rising)
-// and skip the boost when they're coasting or braking (speed dropping).
-// We measure this from the velocity delta itself, which works on PC and on
-// every mobile launcher regardless of how it maps the gas key.
+// STALLION's stock client-side handling.cfg tops out around 160 km/h, so we
+// inject extra forward thrust on the server every tick to push the car up
+// to 250 km/h. The thrust is FORWARD-DIRECTIONAL (not a raw velocity
+// multiplier): we project the current velocity onto the car's facing
+// vector, and only add force if the car is actually moving forward and the
+// driver is on the gas (speed is steady or rising vs the previous tick).
+// This way:
+//   * lateral skidding/drifting is NOT amplified
+//   * reversing is NOT amplified
+//   * letting go of gas / braking lets the car coast and decelerate
+//     naturally with zero server interference
 #define AZELOW_MAX_SPEED      250.0   // km/h hard cap
-#define AZELOW_MIN_BOOST       30.0   // km/h - boost only above this
-#define AZELOW_BOOST_MULT      1.05   // per-tick velocity multiplier
-// km/h drop per 500ms tick that counts as 'driver released the gas'.
-// Anything LESS negative than this (i.e. steady or rising) gets boosted.
-#define AZELOW_DECEL_THRESH    1.5
+#define AZELOW_MIN_BOOST       15.0   // km/h - boost only above this
+#define AZELOW_BOOST_MULT      1.08   // per-tick velocity multiplier (~+17%/s)
+#define AZELOW_DECEL_THRESH    3.0    // km/h drop/tick that = off-gas
+// Tick rate (ms). 250ms gives smoother accel feel than 500ms without much CPU.
+#define AZELOW_TICK_MS         250
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
 #define VEL_TO_KMH         180.0
+
+// Per-tick boost is scaled by tick interval so changing AZELOW_TICK_MS
+// doesn't change the *feel* of acceleration (compounding rate stays ~constant).
+// At 250ms we want 1.04 (~17%/sec); at 500ms we'd want 1.08.
+// Compound: (1.04)^4 = 1.169 ~ +17%/sec.
 
 // We track up to 64 dynamically spawned Azelow vehicles (via /spawnazelow)
 // ON TOP of the three static ones — more than enough for a 50-slot server.
@@ -120,6 +130,11 @@ public  AzelowEngineTick()
     new Float:minBoost     = AZELOW_MIN_BOOST   / VEL_TO_KMH;
     new Float:decelThresh  = -AZELOW_DECEL_THRESH / VEL_TO_KMH;
 
+    // Adjust per-tick multiplier so smaller tick interval still gives the
+    // same overall accel curve. Reference: 1.08 over 500ms.
+    new Float:tickFactor = float(AZELOW_TICK_MS) / 500.0;
+    new Float:boostMult  = 1.0 + (AZELOW_BOOST_MULT - 1.0) * tickFactor;
+
     for (new p = 0; p < MAX_PLAYERS; p++)
     {
         if (!IsPlayerConnected(p)) continue;
@@ -137,20 +152,32 @@ public  AzelowEngineTick()
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
 
         // --- accel detection via speed delta from previous tick ---
-        // delta > decelThresh means the driver is on the gas (or holding);
-        // delta < decelThresh means coasting/braking.
         new Float:lastSpeed = gAzelowLastSpeed[p];
         new Float:delta     = speed - lastSpeed;
         gAzelowLastSpeed[p] = speed;
         new bool:onGas = (delta > decelThresh);
 
-        // --- boost only when on gas and within range ---
-        if (onGas && speed > minBoost && speed < maxVel)
+        // --- forward direction from car's heading ---
+        new Float:zAngle;
+        GetVehicleZAngle(vid, zAngle);
+        new Float:fx = -floatsin(zAngle, degrees);
+        new Float:fy =  floatcos(zAngle, degrees);
+
+        // Forward velocity component (signed).
+        // Positive = moving forward; negative = in reverse.
+        new Float:fwdSpeed = vx*fx + vy*fy;
+
+        // --- apply directional thrust only when on gas, going forward, in range ---
+        if (onGas && fwdSpeed > minBoost && speed < maxVel)
         {
-            new Float:m  = AZELOW_BOOST_MULT;
-            new Float:nx = vx * m;
-            new Float:ny = vy * m;
+            // Boost only the forward component, leave lateral motion alone.
+            new Float:newFwd = fwdSpeed * boostMult;
+            new Float:lateralVx = vx - fx*fwdSpeed;
+            new Float:lateralVy = vy - fy*fwdSpeed;
+            new Float:nx = lateralVx + fx*newFwd;
+            new Float:ny = lateralVy + fy*newFwd;
             new Float:nz = vz;
+            // Re-clamp to overall speed cap.
             new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
             if (newSpeed > maxVel)
             {
@@ -161,7 +188,7 @@ public  AzelowEngineTick()
             continue;
         }
 
-        // --- hard cap (in case the car is already over due to slope/etc) ---
+        // --- hard cap when boost path didn't run ---
         if (speed > maxVel)
         {
             new Float:ratio = maxVel / speed;
@@ -202,8 +229,8 @@ public OnFilterScriptInit()
         }
     }
 
-    // Timer every 500 ms to keep engines alive and enforce speed cap.
-    gEngineTimer = SetTimer("AzelowEngineTick", 500, true);
+    // Timer every AZELOW_TICK_MS to keep engines alive + apply boost.
+    gEngineTimer = SetTimer("AzelowEngineTick", AZELOW_TICK_MS, true);
 
     new buf[96];
     format(buf, sizeof(buf), "OnFilterScriptInit: spawned %d/%d Azelows, timer=%d",
