@@ -19,12 +19,16 @@
 // --- speed tuning ---
 // Stock STALLION handling.cfg tops out around 160 km/h on the client, so a
 // raw cap doesn't make the car faster. We *boost* the velocity vector each
-// timer tick — but ONLY while the driver is actively pressing forward
-// (analog up / W / mobile stick forward). When the driver lets go or brakes
-// the car coasts/decelerates naturally with no server-side push.
-#define AZELOW_MAX_SPEED   250.0   // km/h hard cap (server-side)
-#define AZELOW_MIN_BOOST   30.0    // km/h - boost only kicks in above this
-#define AZELOW_BOOST_MULT  1.05    // per-tick velocity multiplier (~+10%/sec)
+// timer tick whenever the driver is on the gas (speed is steady or rising)
+// and skip the boost when they're coasting or braking (speed dropping).
+// We measure this from the velocity delta itself, which works on PC and on
+// every mobile launcher regardless of how it maps the gas key.
+#define AZELOW_MAX_SPEED      250.0   // km/h hard cap
+#define AZELOW_MIN_BOOST       30.0   // km/h - boost only above this
+#define AZELOW_BOOST_MULT      1.05   // per-tick velocity multiplier
+// km/h drop per 500ms tick that counts as 'driver released the gas'.
+// Anything LESS negative than this (i.e. steady or rising) gets boosted.
+#define AZELOW_DECEL_THRESH    1.5
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
 #define VEL_TO_KMH         180.0
@@ -47,6 +51,11 @@ new gAzelowDynIds[AZELOW_MAX_DYN] = { -1, ... };
 
 // Engine-keepalive timer id.
 new gEngineTimer = -1;
+
+// Last measured velocity magnitude per player (in raw SA-MP units).
+// Used to detect whether the car is accelerating (gas) or decelerating
+// (off-gas / braking). Reset on disconnect / state change.
+new Float:gAzelowLastSpeed[MAX_PLAYERS];
 
 
 // -----------------------------------------------------------------------------
@@ -107,8 +116,9 @@ stock AzelowForceReady(vid)
 forward AzelowEngineTick();
 public  AzelowEngineTick()
 {
-    new Float:maxVel   = AZELOW_MAX_SPEED / VEL_TO_KMH;
-    new Float:minBoost = AZELOW_MIN_BOOST / VEL_TO_KMH;
+    new Float:maxVel       = AZELOW_MAX_SPEED   / VEL_TO_KMH;
+    new Float:minBoost     = AZELOW_MIN_BOOST   / VEL_TO_KMH;
+    new Float:decelThresh  = -AZELOW_DECEL_THRESH / VEL_TO_KMH;
 
     for (new p = 0; p < MAX_PLAYERS; p++)
     {
@@ -126,14 +136,16 @@ public  AzelowEngineTick()
         GetVehicleVelocity(vid, vx, vy, vz);
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
 
-        // --- read driver input. ud < 0 means analog up pressed (gas).
-        //     This works for PC (W / up arrow) and mobile (stick forward).
-        new keys, ud, lr;
-        GetPlayerKeys(p, keys, ud, lr);
-        new bool:throttle = (ud < 0);
+        // --- accel detection via speed delta from previous tick ---
+        // delta > decelThresh means the driver is on the gas (or holding);
+        // delta < decelThresh means coasting/braking.
+        new Float:lastSpeed = gAzelowLastSpeed[p];
+        new Float:delta     = speed - lastSpeed;
+        gAzelowLastSpeed[p] = speed;
+        new bool:onGas = (delta > decelThresh);
 
-        // --- boost only while the driver is actively accelerating ---
-        if (throttle && speed > minBoost && speed < maxVel)
+        // --- boost only when on gas and within range ---
+        if (onGas && speed > minBoost && speed < maxVel)
         {
             new Float:m  = AZELOW_BOOST_MULT;
             new Float:nx = vx * m;
@@ -231,13 +243,29 @@ public OnFilterScriptExit()
 
 public OnPlayerStateChange(playerid, newstate, oldstate)
 {
-    // When a player enters an Azelow as driver, auto-start the engine.
+    // When a player enters an Azelow as driver, auto-start the engine
+    // and reset the speed tracker so the boost ramps from the current
+    // velocity, not from a stale (possibly large) value.
     if (newstate == PLAYER_STATE_DRIVER)
     {
         new vid = GetPlayerVehicleID(playerid);
         if (vid != 0 && IsAzelow(vid))
+        {
             AzelowForceReady(vid);
+            gAzelowLastSpeed[playerid] = 0.0;
+        }
     }
+    else
+    {
+        gAzelowLastSpeed[playerid] = 0.0;
+    }
+    return 1;
+}
+
+public OnPlayerDisconnect(playerid, reason)
+{
+    #pragma unused reason
+    gAzelowLastSpeed[playerid] = 0.0;
     return 1;
 }
 
