@@ -6,7 +6,7 @@
 //  * Spawns three Azelow vehicles at the Rodeo showroom (LS).
 //  * /azelow           — teleports the caller into the nearest one.
 //  * /spawnazelow [c1] [c2] — anyone can spawn one in front of them.
-//  * Engine auto-starts on entry, 200 km/h speed cap enforced server-side.
+//  * Engine auto-starts on entry, 250 km/h speed cap enforced server-side.
 //  * Doors always unlocked, full fuel (bypasses gamemode's fuel check).
 //  * Logs to scriptfiles/car_azelow.log.
 // =============================================================================
@@ -16,7 +16,15 @@
 
 #define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
-#define AZELOW_MAX_SPEED   200.0   // km/h cap
+// --- speed tuning ---
+// Stock STALLION handling.cfg tops out around 160 km/h on the client, so a
+// raw cap doesn't make the car faster. We *boost* the velocity vector each
+// timer tick when the driver is actively moving (above MIN_BOOST_KMH) so
+// the car genuinely accelerates harder. The cap MAX_SPEED is then enforced
+// after the boost so we never exceed it.
+#define AZELOW_MAX_SPEED   250.0   // km/h hard cap (server-side)
+#define AZELOW_MIN_BOOST   50.0    // km/h - boost only kicks in above this
+#define AZELOW_BOOST_MULT  1.05    // per-tick velocity multiplier (~+10%/sec)
 
 // Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
 #define VEL_TO_KMH         180.0
@@ -99,7 +107,8 @@ stock AzelowForceReady(vid)
 forward AzelowEngineTick();
 public  AzelowEngineTick()
 {
-    new Float:maxVel = AZELOW_MAX_SPEED / VEL_TO_KMH;
+    new Float:maxVel   = AZELOW_MAX_SPEED / VEL_TO_KMH;
+    new Float:minBoost = AZELOW_MIN_BOOST / VEL_TO_KMH;
 
     for (new p = 0; p < MAX_PLAYERS; p++)
     {
@@ -112,10 +121,29 @@ public  AzelowEngineTick()
         // --- engine keep-alive ---
         AzelowForceReady(vid);
 
-        // --- speed limiter ---
+        // --- velocity read ---
         new Float:vx, Float:vy, Float:vz;
         GetVehicleVelocity(vid, vx, vy, vz);
         new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
+
+        // --- boost: amplify horizontal motion only (avoids vertical kicks) ---
+        if (speed > minBoost && speed < maxVel)
+        {
+            new Float:m  = AZELOW_BOOST_MULT;
+            new Float:nx = vx * m;
+            new Float:ny = vy * m;
+            new Float:nz = vz;
+            new Float:newSpeed = floatsqroot(nx*nx + ny*ny + nz*nz);
+            if (newSpeed > maxVel)
+            {
+                new Float:k = maxVel / newSpeed;
+                nx *= k; ny *= k;
+            }
+            SetVehicleVelocity(vid, nx, ny, nz);
+            continue;
+        }
+
+        // --- hard cap when boost path didn't run ---
         if (speed > maxVel)
         {
             new Float:ratio = maxVel / speed;
@@ -134,7 +162,7 @@ public OnFilterScriptInit()
     print("[car_azelow] -------------------------------------------");
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
     print("[car_azelow]  Model ID: 439 (STALLION) | Open to all");
-    print("[car_azelow]  Speed cap: 200 km/h | Fuel: infinite");
+    print("[car_azelow]  Speed cap: 250 km/h | Boost: +5%/tick | Fuel: infinite");
     print("[car_azelow] -------------------------------------------");
 
     new spawned = 0;
