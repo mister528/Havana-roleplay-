@@ -3,28 +3,12 @@
 // -----------------------------------------------------------------------------
 //  Filterscript for HavanaRp / SA-MP 0.3.7 R2.
 //
-//  What it does
-//  ------------
-//  * Spawns three Azelow vehicles at the rich-family showroom in Rodeo (LS).
-//  * Adds /azelow              — teleports the player into the nearest one.
-//  * Adds /spawnazelow [color1] [color2]
-//                              — anyone can spawn an Azelow in front of them.
-//  * Logs every spawn/use to scriptfiles/car_azelow.log.
-//
-//  Why a separate filterscript
-//  ---------------------------
-//  The main gamemode (arabonline.amx) ships obfuscated and is too risky to
-//  edit directly. Adding the new car as an isolated filterscript keeps it
-//  reversible: drop the .amx, list it in server.cfg's `filterscripts ...`,
-//  and you are done. Removing it only takes deleting the line.
-//
-//  Important
-//  ---------
-//  This filterscript spawns vehicles using the stock STALLION model id (439)
-//  because SAMP 0.3.7-R2 rejects custom ids outside 400-611 server-side.
-//  Players see the Azelow geometry only if their gta3.img has the matching
-//  azelow.dff/azelow.txd installed in place of the stock stallion files.
-//  See ../patch_8000_azelow/ for the client-side patch.
+//  * Spawns three Azelow vehicles at the Rodeo showroom (LS).
+//  * /azelow           — teleports the caller into the nearest one.
+//  * /spawnazelow [c1] [c2] — anyone can spawn one in front of them.
+//  * Engine auto-starts on entry, 200 km/h speed cap enforced server-side.
+//  * Doors always unlocked, full fuel (bypasses gamemode's fuel check).
+//  * Logs to scriptfiles/car_azelow.log.
 // =============================================================================
 
 #include <a_samp>
@@ -32,16 +16,29 @@
 
 #define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
+#define AZELOW_MAX_SPEED   200.0   // km/h cap
 
-// Three spawn points around the rich-family Rodeo showroom (Los Santos).
+// Conversion: SA-MP velocity magnitude * 180 ≈ km/h.
+#define VEL_TO_KMH         180.0
+
+// We track up to 64 dynamically spawned Azelow vehicles (via /spawnazelow)
+// ON TOP of the three static ones — more than enough for a 50-slot server.
+#define AZELOW_MAX_DYN     64
+
+// Three pre-placed spawn points around the Rodeo showroom (Los Santos).
 new const Float:gAzelowSpawns[][4] = {
-    // x,         y,         z,        rotation
     {  392.4203,  -1503.1057, 23.4438,  88.7562 },
     {  396.7450,  -1496.9890, 23.4438,  88.7562 },
     {  401.2500,  -1490.7000, 23.4438,  88.7562 }
 };
 
-new gAzelowVehicleIds[sizeof(gAzelowSpawns)] = { -1, ... };
+new gAzelowStaticIds[sizeof(gAzelowSpawns)] = { -1, ... };
+
+// Dynamic set filled by /spawnazelow; -1 = empty slot.
+new gAzelowDynIds[AZELOW_MAX_DYN] = { -1, ... };
+
+// Engine-keepalive timer id.
+new gEngineTimer = -1;
 
 
 // -----------------------------------------------------------------------------
@@ -60,6 +57,73 @@ LogAzelow(const text[])
     fclose(fp);
 }
 
+// Return true if `vid` belongs to our set (static or dynamic).
+stock IsAzelow(vid)
+{
+    for (new i = 0; i < sizeof(gAzelowStaticIds); i++)
+        if (gAzelowStaticIds[i] == vid) return 1;
+    for (new i = 0; i < AZELOW_MAX_DYN; i++)
+        if (gAzelowDynIds[i] == vid) return 1;
+    return 0;
+}
+
+// Register a dynamically spawned Azelow, returns 1 if stored ok.
+stock RegisterDynAzelow(vid)
+{
+    for (new i = 0; i < AZELOW_MAX_DYN; i++)
+    {
+        if (gAzelowDynIds[i] == -1)
+        {
+            gAzelowDynIds[i] = vid;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Start the engine and unlock doors for a vehicle.
+stock AzelowForceReady(vid)
+{
+    new engine, lights, alarm, doors, bonnet, boot, objective;
+    GetVehicleParamsEx(vid, engine, lights, alarm, doors, bonnet, boot, objective);
+    SetVehicleParamsEx(vid, VEHICLE_PARAMS_ON, lights, alarm, false, bonnet, boot, objective);
+}
+
+
+// -----------------------------------------------------------------------------
+// Timer: keep engine alive for all occupied Azelows (overrides gamemode fuel=0).
+// Also enforces the 200 km/h speed cap.
+// Runs every 500 ms.
+// -----------------------------------------------------------------------------
+
+forward AzelowEngineTick();
+public  AzelowEngineTick()
+{
+    new Float:maxVel = AZELOW_MAX_SPEED / VEL_TO_KMH;
+
+    for (new p = 0; p < MAX_PLAYERS; p++)
+    {
+        if (!IsPlayerConnected(p)) continue;
+        if (GetPlayerState(p) != PLAYER_STATE_DRIVER) continue;
+
+        new vid = GetPlayerVehicleID(p);
+        if (vid == 0 || !IsAzelow(vid)) continue;
+
+        // --- engine keep-alive ---
+        AzelowForceReady(vid);
+
+        // --- speed limiter ---
+        new Float:vx, Float:vy, Float:vz;
+        GetVehicleVelocity(vid, vx, vy, vz);
+        new Float:speed = floatsqroot(vx*vx + vy*vy + vz*vz);
+        if (speed > maxVel)
+        {
+            new Float:ratio = maxVel / speed;
+            SetVehicleVelocity(vid, vx * ratio, vy * ratio, vz * ratio);
+        }
+    }
+}
+
 
 // -----------------------------------------------------------------------------
 // hooks
@@ -69,42 +133,77 @@ public OnFilterScriptInit()
 {
     print("[car_azelow] -------------------------------------------");
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
-    print("[car_azelow]  Model ID: 439 (STALLION slot, replaced by Azelow)");
-    print("[car_azelow]  /spawnazelow is open to all players.");
+    print("[car_azelow]  Model ID: 439 (STALLION) | Open to all");
+    print("[car_azelow]  Speed cap: 200 km/h | Fuel: infinite");
     print("[car_azelow] -------------------------------------------");
 
     new spawned = 0;
     for (new i = 0; i < sizeof(gAzelowSpawns); i++)
     {
-        gAzelowVehicleIds[i] = CreateVehicle(
+        gAzelowStaticIds[i] = CreateVehicle(
             AZELOW_MODEL,
             gAzelowSpawns[i][0],
             gAzelowSpawns[i][1],
             gAzelowSpawns[i][2],
             gAzelowSpawns[i][3],
-            -1, -1,           // random colours
-            -1                // never auto-respawn
+            -1, -1,
+            -1
         );
-        if (gAzelowVehicleIds[i] != INVALID_VEHICLE_ID) spawned++;
+        if (gAzelowStaticIds[i] != INVALID_VEHICLE_ID)
+        {
+            AzelowForceReady(gAzelowStaticIds[i]);
+            spawned++;
+        }
     }
 
+    // Timer every 500 ms to keep engines alive and enforce speed cap.
+    gEngineTimer = SetTimer("AzelowEngineTick", 500, true);
+
     new buf[96];
-    format(buf, sizeof(buf), "OnFilterScriptInit: spawned %d/%d Azelows", spawned, sizeof(gAzelowSpawns));
+    format(buf, sizeof(buf), "OnFilterScriptInit: spawned %d/%d Azelows, timer=%d",
+        spawned, sizeof(gAzelowSpawns), gEngineTimer);
     LogAzelow(buf);
     return 1;
 }
 
 public OnFilterScriptExit()
 {
-    for (new i = 0; i < sizeof(gAzelowVehicleIds); i++)
+    if (gEngineTimer != -1)
     {
-        if (gAzelowVehicleIds[i] != INVALID_VEHICLE_ID && gAzelowVehicleIds[i] != -1)
+        KillTimer(gEngineTimer);
+        gEngineTimer = -1;
+    }
+
+    for (new i = 0; i < sizeof(gAzelowStaticIds); i++)
+    {
+        if (gAzelowStaticIds[i] != INVALID_VEHICLE_ID && gAzelowStaticIds[i] != -1)
         {
-            DestroyVehicle(gAzelowVehicleIds[i]);
-            gAzelowVehicleIds[i] = -1;
+            DestroyVehicle(gAzelowStaticIds[i]);
+            gAzelowStaticIds[i] = -1;
         }
     }
-    LogAzelow("OnFilterScriptExit: cleaned up Azelows");
+    for (new i = 0; i < AZELOW_MAX_DYN; i++)
+    {
+        if (gAzelowDynIds[i] != -1)
+        {
+            DestroyVehicle(gAzelowDynIds[i]);
+            gAzelowDynIds[i] = -1;
+        }
+    }
+
+    LogAzelow("OnFilterScriptExit: cleaned up");
+    return 1;
+}
+
+public OnPlayerStateChange(playerid, newstate, oldstate)
+{
+    // When a player enters an Azelow as driver, auto-start the engine.
+    if (newstate == PLAYER_STATE_DRIVER)
+    {
+        new vid = GetPlayerVehicleID(playerid);
+        if (vid != 0 && IsAzelow(vid))
+            AzelowForceReady(vid);
+    }
     return 1;
 }
 
@@ -122,10 +221,24 @@ CMD:azelow(playerid, params[])
 
     new bestVeh   = INVALID_VEHICLE_ID;
     new Float:best = 99999.0;
-    for (new i = 0; i < sizeof(gAzelowVehicleIds); i++)
+
+    // Check static Azelows.
+    for (new i = 0; i < sizeof(gAzelowStaticIds); i++)
     {
-        new vid = gAzelowVehicleIds[i];
+        new vid = gAzelowStaticIds[i];
         if (vid == INVALID_VEHICLE_ID || vid == -1) continue;
+        new Float:vx, Float:vy, Float:vz;
+        GetVehiclePos(vid, vx, vy, vz);
+        new Float:d = floatsqroot(
+            (vx-px)*(vx-px) + (vy-py)*(vy-py) + (vz-pz)*(vz-pz)
+        );
+        if (d < best) { best = d; bestVeh = vid; }
+    }
+    // Check dynamic Azelows.
+    for (new i = 0; i < AZELOW_MAX_DYN; i++)
+    {
+        new vid = gAzelowDynIds[i];
+        if (vid == -1) continue;
         new Float:vx, Float:vy, Float:vz;
         GetVehiclePos(vid, vx, vy, vz);
         new Float:d = floatsqroot(
@@ -161,7 +274,6 @@ CMD:spawnazelow(playerid, params[])
     GetPlayerPos(playerid, px, py, pz);
     GetPlayerFacingAngle(playerid, pa);
 
-    // Drop the spawn ~5m in front of the caller, on the same z-level.
     new Float:fx = px + floatcos(pa+90.0, degrees) * 5.0;
     new Float:fy = py + floatsin(pa+90.0, degrees) * 5.0;
 
@@ -172,6 +284,10 @@ CMD:spawnazelow(playerid, params[])
             "{FF6464}* CreateVehicle failed - server rejected the model.");
         return 1;
     }
+
+    // Auto-ready + register for engine keep-alive.
+    AzelowForceReady(vid);
+    RegisterDynAzelow(vid);
 
     new buf[96], name[MAX_PLAYER_NAME];
     GetPlayerName(playerid, name, sizeof(name));
@@ -187,7 +303,7 @@ CMD:spawnazelow(playerid, params[])
 }
 
 
-// Tiny inline parser so we don't pull in sscanf just for two optional ints.
+// Tiny inline parser — two optional ints.
 sscanf_two_ints(const params[], &c1, &c2)
 {
     new pos = 0, len = strlen(params);
