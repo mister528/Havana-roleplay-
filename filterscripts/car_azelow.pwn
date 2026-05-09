@@ -30,8 +30,10 @@
 #include <a_samp>
 #include <zcmd>
 
-#define AZELOW_MODEL    8000
-#define AZELOW_LOGFILE  "car_azelow.log"
+#define AZELOW_MODEL       8000
+#define AZELOW_LOGFILE     "car_azelow.log"
+#define AZELOW_ADMINFILE   "azelow_admins.txt"
+#define AZELOW_MAX_ADMINS  64
 
 // Three spawn points around the rich-family Rodeo showroom (Los Santos).
 // Coordinates lifted from a vanilla driving school zone — flat ground,
@@ -62,9 +64,66 @@ LogAzelow(const text[])
     fclose(fp);
 }
 
+// Cache loaded once at OnFilterScriptInit. If the file is missing or empty
+// we treat the whitelist as "unset" and let everyone use /spawnazelow.
+new gAzelowAdmins[AZELOW_MAX_ADMINS][MAX_PLAYER_NAME];
+new gAzelowAdminCount      = 0;
+new bool:gAzelowWhitelistSet = false;
+
+stock LoadAzelowAdmins()
+{
+    gAzelowAdminCount      = 0;
+    gAzelowWhitelistSet    = false;
+
+    new File:fp = fopen(AZELOW_ADMINFILE, io_read);
+    if (fp == File:0)
+    {
+        // Auto-create a stub so the admin can edit it later via FTP.
+        new File:nfp = fopen(AZELOW_ADMINFILE, io_write);
+        if (nfp != File:0)
+        {
+            fwrite(nfp, "# car_azelow whitelist for /spawnazelow\r\n");
+            fwrite(nfp, "# One in-game player name per line (case-insensitive).\r\n");
+            fwrite(nfp, "# Lines starting with # are comments. Empty file = everyone allowed.\r\n");
+            fwrite(nfp, "#\r\n");
+            fwrite(nfp, "# Example:\r\n");
+            fwrite(nfp, "# Hapad_Salem\r\n");
+            fclose(nfp);
+        }
+        return;
+    }
+
+    new line[64];
+    while (fread(fp, line))
+    {
+        // Trim CR/LF and trailing whitespace.
+        new len = strlen(line);
+        while (len > 0 && (line[len-1] == '\r' || line[len-1] == '\n' || line[len-1] == ' ' || line[len-1] == '\t'))
+            line[--len] = EOS;
+        // Skip blanks + comments.
+        new s = 0;
+        while (line[s] == ' ' || line[s] == '\t') s++;
+        if (line[s] == EOS || line[s] == '#') continue;
+        if (gAzelowAdminCount >= AZELOW_MAX_ADMINS) break;
+        strmid(gAzelowAdmins[gAzelowAdminCount], line, s, len, MAX_PLAYER_NAME);
+        gAzelowAdminCount++;
+    }
+    fclose(fp);
+    gAzelowWhitelistSet = (gAzelowAdminCount > 0);
+}
+
 stock IsPlayerAdminish(playerid)
 {
-    return IsPlayerAdmin(playerid);
+    if (IsPlayerAdmin(playerid)) return 1;          // RCON-logged-in players
+    if (!gAzelowWhitelistSet)    return 1;          // open by default
+
+    new name[MAX_PLAYER_NAME];
+    GetPlayerName(playerid, name, sizeof(name));
+    for (new i = 0; i < gAzelowAdminCount; i++)
+    {
+        if (strcmp(gAzelowAdmins[i], name, true) == 0) return 1;
+    }
+    return 0;
 }
 
 
@@ -78,6 +137,12 @@ public OnFilterScriptInit()
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
     print("[car_azelow]  Model ID: 8000");
     print("[car_azelow] -------------------------------------------");
+
+    LoadAzelowAdmins();
+    if (gAzelowWhitelistSet)
+        printf("[car_azelow]  Loaded %d admin name(s) from %s", gAzelowAdminCount, AZELOW_ADMINFILE);
+    else
+        print("[car_azelow]  No whitelist set -> /spawnazelow is open to all.");
 
     new spawned = 0;
     for (new i = 0; i < sizeof(gAzelowSpawns); i++)
@@ -163,7 +228,7 @@ CMD:spawnazelow(playerid, params[])
     if (!IsPlayerAdminish(playerid))
     {
         SendClientMessage(playerid, 0xFF6464FF,
-            "{FF6464}* /spawnazelow is admin-only.");
+            "{FF6464}* /spawnazelow is whitelisted. Add your name to scriptfiles/azelow_admins.txt or /rcon login.");
         return 1;
     }
 
