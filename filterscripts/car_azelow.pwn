@@ -1,5 +1,5 @@
 // =============================================================================
-//  car_azelow — Daewoo Gentra Azelow (custom vehicle ID 8000)
+//  car_azelow — Daewoo Gentra Azelow (replaces STALLION, model id 439)
 // -----------------------------------------------------------------------------
 //  Filterscript for HavanaRp / SA-MP 0.3.7 R2.
 //
@@ -20,9 +20,12 @@
 //
 //  Important
 //  ---------
-//  Vehicle ID 8000 only renders if the GTA SA Mobile install has the matching
+//  This filterscript spawns vehicles using the stock STALLION model id (439)
+//  because SAMP 0.3.7-R2 rejects custom ids outside 400-611 server-side.
+//  Players see the Azelow geometry only if their gta3.img has the matching
 //  azelow.dff/azelow.txd in its IMG archive AND the model is declared in
-//  data/vehicles.ide. See ../patch_8000_azelow/ for the client-side patch.
+//  stallion.dff / stallion.txd files installed.
+//  See ../patch_8000_azelow/ for the client-side patch.
 //  CreateVehicle still works server-side regardless because the HavanaRp
 //  launcher (libluxury.so) accepts model IDs > 611 over the wire.
 // =============================================================================
@@ -30,7 +33,15 @@
 #include <a_samp>
 #include <zcmd>
 
-#define AZELOW_MODEL       8000
+// NOTE: SAMP 0.3.7-R2 server rejects vehicle model IDs outside 400-611 in
+// CreateVehicle, regardless of any client-side modding. The Daewoo Gentra
+// Azelow .dff/.txd files in the user-supplied archive were named
+// `stallion.dff` / `stallion.txd`, which means the modder intended for them
+// to REPLACE the stock STALLION (model 439) inside `gta3.img`. We follow
+// that convention here so /spawnazelow uses a stock-valid model id and the
+// player still sees the Azelow geometry once the patched gta3.img is
+// installed on their device.
+#define AZELOW_MODEL       439
 #define AZELOW_LOGFILE     "car_azelow.log"
 #define AZELOW_ADMINFILE   "azelow_admins.txt"
 #define AZELOW_MAX_ADMINS  64
@@ -135,7 +146,7 @@ public OnFilterScriptInit()
 {
     print("[car_azelow] -------------------------------------------");
     print("[car_azelow]  Daewoo Gentra Azelow filterscript loaded");
-    print("[car_azelow]  Model ID: 8000");
+    print("[car_azelow]  Model ID: 439 (STALLION slot, replaced by Azelow)");
     print("[car_azelow] -------------------------------------------");
 
     LoadAzelowAdmins();
@@ -247,7 +258,7 @@ CMD:spawnazelow(playerid, params[])
     if (vid == INVALID_VEHICLE_ID)
     {
         SendClientMessage(playerid, 0xFF6464FF,
-            "{FF6464}* CreateVehicle failed (model 8000 may not exist on this server).");
+            "{FF6464}* CreateVehicle failed - server rejected the model.");
         return 1;
     }
 
