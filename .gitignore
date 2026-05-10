@@ -1,0 +1,16 @@
+*.amx
+*.amx.bak
+*.bak
+*.bak.*
+*.log
+*.dll
+*.exe
+*.so
+samp03svr
+samp-npc
+announce
+core.*
+mysql_log.txt
+screenlog.0
+server_log.txt*
+*.lib
