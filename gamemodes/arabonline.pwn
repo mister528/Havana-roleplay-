@@ -96132,13 +96132,23 @@ CMD:timecar(playerid)
 // ========================================================================
 // SHOP KIOSK SYSTEM (v12) - player-rentable selling kiosks
 // ========================================================================
-#define SHOP_MAX_KIOSKS              16
+#define SHOP_MAX_KIOSKS              20
 #define SHOP_MAX_ITEMS_PER_KIOSK     8
 #define SHOP_RENT_PER_HOUR           580
 #define SHOP_MAX_HOURS               3
 #define SHOP_ITEM_TYPES              7
 #define SHOP_NEAR_DIST               4.0
-#define SHOP_KIOSK_OBJ_MODEL         2583
+// marketstall01_SFXRF (replaces former blue panel 2583).
+// Layout, coordinates and rotation come from scriptfiles/kosk.txt.
+#define SHOP_KIOSK_OBJ_MODEL         3861
+#define SHOP_KIOSK_BASE_X            1117.9277
+#define SHOP_KIOSK_BASE_Y            -1429.2900
+#define SHOP_KIOSK_BASE_Z            15.9968
+#define SHOP_KIOSK_BASE_RZ           91.79
+#define SHOP_KIOSK_SPACING           2.0
+#define SHOP_KIOSK_LEFT_COUNT        9
+#define SHOP_KIOSK_RIGHT_COUNT       10
+#define SHOP_KIOSK_PICK_OFFSET_Y     -1.5
 #define SHOP_DEALER_X                1130.00
 #define SHOP_DEALER_Y                -1446.50
 #define SHOP_DEALER_Z                15.796875
@@ -96160,28 +96170,44 @@ forward shop_db_loaded_items();
 forward shop_on_player_connect(playerid);
 forward shop_on_player_disconnect(playerid);
 
-// 8 north (facing south 180) indices 0..7; 8 south (facing north 0) indices 8..15
-// X span 1120..1138 (18m across 7 gaps) => spacing ~2.571m
+// 20 kiosks (marketstall01_SFXRF, id 3861) in a single east-west row at
+// Y=-1429.29, Z=15.9968, RZ=91.79 (base coords from scriptfiles/kosk.txt).
+// Indices 0..9  = 10 kiosks LEFT  of the base (X = base - 18..-0, step 2m)
+// Indices 10..19 = 10 kiosks RIGHT of the base (X = base + 2..+20, step 2m)
+// In-game labels render as [ «·ﬂ‘ﬂ 1 ] .. [ «·ﬂ‘ﬂ 20 ] from left to right.
 static stock Float:g_shop_k_pos_x[SHOP_MAX_KIOSKS] = {
-    1120.00, 1122.57, 1125.14, 1127.71, 1130.29, 1132.86, 1135.43, 1138.00,
-    1120.00, 1122.57, 1125.14, 1127.71, 1130.29, 1132.86, 1135.43, 1138.00
+    // LEFT side (10): base-18, -16, -14, -12, -10, -8, -6, -4, -2, 0
+    1099.9277, 1101.9277, 1103.9277, 1105.9277, 1107.9277,
+    1109.9277, 1111.9277, 1113.9277, 1115.9277, 1117.9277,
+    // RIGHT side (10): base+2, +4, +6, +8, +10, +12, +14, +16, +18, +20
+    1119.9277, 1121.9277, 1123.9277, 1125.9277, 1127.9277,
+    1129.9277, 1131.9277, 1133.9277, 1135.9277, 1137.9277
 };
 static stock Float:g_shop_k_pos_y[SHOP_MAX_KIOSKS] = {
-    -1434.00, -1434.00, -1434.00, -1434.00, -1434.00, -1434.00, -1434.00, -1434.00,
-    -1440.50, -1440.50, -1440.50, -1440.50, -1440.50, -1440.50, -1440.50, -1440.50
+    -1429.2900, -1429.2900, -1429.2900, -1429.2900, -1429.2900,
+    -1429.2900, -1429.2900, -1429.2900, -1429.2900, -1429.2900,
+    -1429.2900, -1429.2900, -1429.2900, -1429.2900, -1429.2900,
+    -1429.2900, -1429.2900, -1429.2900, -1429.2900, -1429.2900
 };
 static stock Float:g_shop_k_pos_z[SHOP_MAX_KIOSKS] = {
-    15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875,
-    15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875, 15.796875
+    15.9968, 15.9968, 15.9968, 15.9968, 15.9968,
+    15.9968, 15.9968, 15.9968, 15.9968, 15.9968,
+    15.9968, 15.9968, 15.9968, 15.9968, 15.9968,
+    15.9968, 15.9968, 15.9968, 15.9968, 15.9968
 };
 static stock Float:g_shop_k_pos_a[SHOP_MAX_KIOSKS] = {
-    180.0, 180.0, 180.0, 180.0, 180.0, 180.0, 180.0, 180.0,
-      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0
+    91.79, 91.79, 91.79, 91.79, 91.79,
+    91.79, 91.79, 91.79, 91.79, 91.79,
+    91.79, 91.79, 91.79, 91.79, 91.79,
+    91.79, 91.79, 91.79, 91.79, 91.79
 };
-// Pickup "?" sits ~1.6m in FRONT of kiosk (toward the central walkway Y=-1437)
+// Pickup "?" (and 3D text) sits 1.5m south of each kiosk so players approaching
+// from the south (where the rent dealer stands) see the marker in front.
 static stock Float:g_shop_k_pick_y[SHOP_MAX_KIOSKS] = {
-    -1435.60, -1435.60, -1435.60, -1435.60, -1435.60, -1435.60, -1435.60, -1435.60,
-    -1438.90, -1438.90, -1438.90, -1438.90, -1438.90, -1438.90, -1438.90, -1438.90
+    -1430.7900, -1430.7900, -1430.7900, -1430.7900, -1430.7900,
+    -1430.7900, -1430.7900, -1430.7900, -1430.7900, -1430.7900,
+    -1430.7900, -1430.7900, -1430.7900, -1430.7900, -1430.7900,
+    -1430.7900, -1430.7900, -1430.7900, -1430.7900, -1430.7900
 };
 
 new g_shop_k_owner[SHOP_MAX_KIOSKS];
