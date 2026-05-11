@@ -60354,8 +60354,10 @@ public OnDialogResponse(playerid, dialogid, response, listitem, inputtext[])
 		case d_car_shop:
 		{
 			if ( ! response ) return DeletePVar ( playerid, "tshop_id" ) ;
-			if ( listitem < 0 || listitem >= 8 ) return 1 ;
-			carshop_enter ( playerid, listitem ) ;
+			// listitem 0 is the "choose a category" header line, real
+			// categories start at listitem 1; subtract one to get the cat index.
+			if ( listitem < 1 || listitem >= 9 ) return 1 ;
+			carshop_enter ( playerid, listitem - 1 ) ;
 			return 1 ;
 		}
 		case d_delivery:
