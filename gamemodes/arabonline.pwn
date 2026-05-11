@@ -4031,8 +4031,8 @@ new t_shop_models [ 42 ] [ 10 ] = {
 	{ 602, 489, 402, 478, 421, 458, 418, 521, 452, 447 },
 	{ 415, 500, 410, 535, 426, 479, 482, 468, 453, 487 },
 	{ 445, 579, 411, 543, 466, 459, 483, 463, 454, 513 },
-	{ 516, 0, 412, 554, 467, 0, 0, 462, 472, 519 },
-	{ 560, 0, 419, 600, 492, 0, 0, 461, 473, 593 },
+	{ 560, 0, 412, 554, 467, 0, 0, 462, 472, 519 },
+	{ 516, 0, 419, 600, 492, 0, 0, 461, 473, 593 },
 	{ 0, 0, 429, 0, 507, 0, 0, 581, 484, 0 },
 	{ 0, 0, 436, 0, 529, 0, 0, 586, 493, 0 },
 	{ 0, 0, 451, 0, 540, 0, 0, 0, 0, 0 },
@@ -15591,7 +15591,7 @@ stock GetModelPrice ( model )
 		case 542:model_price=17000;
 		case 492:model_price=34000;
 		case 517:model_price=24500;
-		case 516:model_price=43000;
+		case 516:model_price=8000000;
 		case 467:model_price=33000;
 		case 600:model_price=18500;
 		case 549:model_price=22100;
@@ -15600,7 +15600,7 @@ stock GetModelPrice ( model )
 		case 474:model_price=18450;
 		case 410:model_price=13500;
 		case 422:model_price=24500;
-		case 439:model_price=27400;
+		case 439:model_price=1500000;
 		case 479:model_price=49600;
 		case 535:model_price=25200;
 		case 543:model_price=17000;
@@ -15612,7 +15612,7 @@ stock GetModelPrice ( model )
 		case 421:model_price=126200;
 		case 426:model_price=130000;
 		case 436:model_price=82600;
-		case 445:model_price=142000;
+		case 445:model_price=5000000;
 		case 458:model_price=159000;
 		case 505:model_price=175000;
 		case 500:model_price=116500;
@@ -15640,19 +15640,19 @@ stock GetModelPrice ( model )
 		case 576:model_price=235000;
 		case 412:model_price=1320000;
 
-		case 415:model_price=1800000;
+		case 415:model_price=3000000;
 		case 451:model_price=900000;
 		case 402:model_price=630000;
 		case 477:model_price=1250000;
 		case 480:model_price=1200000;
 		case 429:model_price=730000;
-		case 560:model_price=610000;
+		case 560:model_price=6000000;
 		case 541:model_price=2000000;
 		case 559:model_price=400000;
 		case 506:model_price=600000;
 		case 565:model_price=654000;
 		case 587:model_price=540000;
-		case 602:model_price=290000;
+		case 602:model_price=2500000;
 		//case 603:model_price=400000;
 		case 411:model_price=1000000;
 		case 508:model_price=1300000;
